@@ -60,4 +60,3 @@ we should add an assrt here to make sure the ptr is at least as large as the sum
 ### read_checkpoint
 
 This is a helper function to load an external model so we can use it. We effectively, get a file, read it, and then pass it into our memory map function in order to initialize our model.
-

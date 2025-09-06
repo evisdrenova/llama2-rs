@@ -17,29 +17,30 @@ pub struct Config {
     pub seq_len: usize,
 }
 
-impl Config {
-    fn parse_le_bytes(header: &[u8]) -> Result<Self, String> {
-        let need = size_of::<Config>();
-        if header.len() < need {
-            return Err(format!(
-                "header too small: have {}, need {}",
-                hdr.len(),
-                need
-            ));
-        }
+#[derive(Debug, Clone, Copy)]
+struct DiskConfig {
+    dim: i32,
+    hidden_dim: i32,
+    n_layers: i32,
+    n_heads: i32,
+    n_kv_heads: i32,
+    vocab_size: i32, // may be NEGATIVE in file to signal "unshared"
+    seq_len: i32,
+}
 
+impl DiskConfig {
+    /// Parse from a raw little-endian byte buffer
+    fn from_le_bytes(hdr: &[u8]) -> Result<Self> {
+        let need = size_of::<DiskConfig>();
+        if hdr.len() < need {
+            println!("header is too small")
+        }
         let mut off = 0usize;
         let mut next_i32 = || {
-            let bytes = [
-                header[offset],
-                header[offset + 1],
-                header[offset + 2],
-                header[offset + 3],
-            ];
-            offset += 4;
-            i32::from_le_bytes(bytes)
+            let b = [hdr[off], hdr[off + 1], hdr[off + 2], hdr[off + 3]];
+            off += 4;
+            i32::from_le_bytes(b)
         };
-
         Ok(Self {
             dim: next_i32(),
             hidden_dim: next_i32(),
