@@ -3,7 +3,7 @@
 use std::{
     error,
     fs::{File, OpenOptions},
-    io::{self, Read, Result},
+    io::{self, Read, Result, Seek, SeekFrom},
     path::Path,
 };
 
@@ -17,6 +17,7 @@ pub struct Config {
     pub seq_len: usize,
 }
 
+// header is parsed into this. we could make the config have i32 fields but it messes up the memory map weights function which deals with usizes, maybe come back later an dupdate it adn then we can get rid of this struct
 #[derive(Debug, Clone, Copy)]
 struct DiskConfig {
     dim: i32,
@@ -155,19 +156,78 @@ pub fn memory_map_weights<'a>(
     };
 }
 
-fn read_checkpoint<'a>(
-    checkpoint: &str,
-    config: &mut Config,
-    weights: &mut TransformerWeights,
-    fd: usize,
-    data: &'a [f32],
-    file_size: usize,
-) -> Result<(File, Mmap), Box<dyn std::error::Error>> {
-    let mut file = File::open(checkpoint)?;
+pub fn read_checkpoint<'a>(
+    checkpoint: &Path,
+    weights_out: &'a mut TransformerWeights<'a>,
+) -> Result<Config> {
+    let mut f = File::open(checkpoint)?;
 
-    // Read config header using safe deserialization
-    let config_bytes = read_exact_bytes(&mut file, size_of::<Config>())?;
-    let parsed_config = parse_config_from_bytes(&config_bytes)?;
+    let file_size = f.seek(SeekFrom::End(0))?;
+    f.seek(SeekFrom::Start(0))?;
+
+    let mut hdr = vec![0u8; size_of::<DiskConfig>()];
+    f.read_exact(&mut hdr)?;
+
+    let disk = DiskConfig::from_le_bytes(&hdr)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let (cfg, shared) =
+        to_runtime_config(disk).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    // 3) shared / vocab normalization (C code semantics)
+    let shared_weights = cfg.vocab_size > 0;
+    cfg.vocab_size = cfg.vocab_size.abs();
+
+    // read payload
+    let payload_bytes = (file_size as usize).saturating_sub(size_of::<DiskConfig>());
+    if payload_bytes % 4 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "weights length not multiple of 4",
+        ));
+    }
+
+    let mut raw = vec![0u8; payload_bytes];
+    f.read_exact(&mut raw)?;
+
+    // bytes -> f32 (safe conversion)
+    let mut floats = Vec::<f32>::with_capacity(payload_bytes / 4);
+    for chunk in raw.chunks_exact(4) {
+        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+
+    // keep storage alive (own it somewhere; demo uses a leak to keep lifetimes simple)
+    let boxed: Box<[f32]> = floats.into_boxed_slice();
+    let all_f32: &'static [f32] = Box::leak(boxed);
+
+    memory_map_weights(weights_out, &cfg, all_f32, shared)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    Ok(cfg)
+}
+
+fn to_runtime_config(disk: DiskConfig) -> Result<(Config, bool), String> {
+    // negative vocab means "unshared" in the legacy format; take absolute for value
+    let shared_weights = disk.vocab_size > 0;
+    let vocab_abs = disk.vocab_size.unsigned_abs(); // u32
+
+    // Ensure all fields are non-negative and fit into usize
+    fn cast(n: i32, name: &str) -> Result<usize, String> {
+        if n < 0 {
+            return Err(format!("{} must be >= 0 (got {})", name, n));
+        }
+        Ok(n as usize) // safe for practical sizes; usize >= 32 bits on all targets you care about
+    }
+
+    let cfg = Config {
+        dim: cast(disk.dim, "dim")?,
+        hidden_dim: cast(disk.hidden_dim, "hidden_dim")?,
+        n_layers: cast(disk.n_layers, "n_layers")?,
+        n_heads: cast(disk.n_heads, "n_heads")?,
+        n_kv_heads: cast(disk.n_kv_heads, "n_kv_heads")?,
+        vocab_size: vocab_abs as usize, // already abs’d above
+        seq_len: cast(disk.seq_len, "seq_len")?,
+    };
+    Ok((cfg, shared_weights))
 }
 
 fn main() {
