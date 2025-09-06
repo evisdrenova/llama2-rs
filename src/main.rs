@@ -1,8 +1,7 @@
 // a port of karpathy's llama2.c in pure rust
 
 use std::{
-    error,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{self, Read, Result, Seek, SeekFrom},
     path::Path,
 };
@@ -13,7 +12,7 @@ pub struct Config {
     pub n_layers: usize,
     pub n_heads: usize,
     pub n_kv_heads: usize,
-    pub vocab_size: usize,
+    pub vocab_size: i32,
     pub seq_len: usize,
 }
 
@@ -162,18 +161,20 @@ pub fn read_checkpoint<'a>(
 ) -> Result<Config> {
     let mut f = File::open(checkpoint)?;
 
+    // get file size
     let file_size = f.seek(SeekFrom::End(0))?;
     f.seek(SeekFrom::Start(0))?;
 
+    // slice the size of the header
     let mut hdr = vec![0u8; size_of::<DiskConfig>()];
     f.read_exact(&mut hdr)?;
 
+    // can do this in one step if we change the type of the config fields in the struct from usize -> i32
     let disk = DiskConfig::from_le_bytes(&hdr)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let (cfg, shared) =
+    let (mut cfg, shared) =
         to_runtime_config(disk).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    // 3) shared / vocab normalization (C code semantics)
     let shared_weights = cfg.vocab_size > 0;
     cfg.vocab_size = cfg.vocab_size.abs();
 
@@ -199,23 +200,25 @@ pub fn read_checkpoint<'a>(
     let boxed: Box<[f32]> = floats.into_boxed_slice();
     let all_f32: &'static [f32] = Box::leak(boxed);
 
-    memory_map_weights(weights_out, &cfg, all_f32, shared)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    memory_map_weights(weights_out, &cfg, all_f32, shared_weights as i32);
 
     Ok(cfg)
 }
 
-fn to_runtime_config(disk: DiskConfig) -> Result<(Config, bool), String> {
+fn to_runtime_config(disk: DiskConfig) -> Result<(Config, bool)> {
     // negative vocab means "unshared" in the legacy format; take absolute for value
     let shared_weights = disk.vocab_size > 0;
-    let vocab_abs = disk.vocab_size.unsigned_abs(); // u32
+    let vocab_abs = disk.vocab_size.abs();
 
     // Ensure all fields are non-negative and fit into usize
-    fn cast(n: i32, name: &str) -> Result<usize, String> {
+    fn cast(n: i32, name: &str) -> Result<usize> {
         if n < 0 {
-            return Err(format!("{} must be >= 0 (got {})", name, n));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "field must be >= 0",
+            ));
         }
-        Ok(n as usize) // safe for practical sizes; usize >= 32 bits on all targets you care about
+        Ok(n as usize)
     }
 
     let cfg = Config {
@@ -224,7 +227,7 @@ fn to_runtime_config(disk: DiskConfig) -> Result<(Config, bool), String> {
         n_layers: cast(disk.n_layers, "n_layers")?,
         n_heads: cast(disk.n_heads, "n_heads")?,
         n_kv_heads: cast(disk.n_kv_heads, "n_kv_heads")?,
-        vocab_size: vocab_abs as usize, // already abs’d above
+        vocab_size: vocab_abs,
         seq_len: cast(disk.seq_len, "seq_len")?,
     };
     Ok((cfg, shared_weights))
