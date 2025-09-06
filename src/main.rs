@@ -124,7 +124,7 @@ pub fn memory_map_weights<'a>(
         slice
     }
 
-    w.token_embedding_table = take(ptr, &mut offset, p.vocab_size * p.dim);
+    w.token_embedding_table = take(ptr, &mut offset, p.vocab_size as usize * p.dim);
     w.rms_att_weight = take(ptr, &mut offset, n_layers * p.dim);
     w.wq = take(ptr, &mut offset, n_layers * p.dim * (p.n_heads * head_size));
     w.wk = take(
@@ -151,7 +151,7 @@ pub fn memory_map_weights<'a>(
     w.wcls = if shared_weights != 0 {
         w.token_embedding_table
     } else {
-        take(ptr, &mut offset, p.vocab_size * p.dim)
+        take(ptr, &mut offset, p.vocab_size as usize * p.dim)
     };
 }
 
