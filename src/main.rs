@@ -81,6 +81,7 @@ pub struct RunState {
 pub struct Transformer<'a> {
     pub config: Config, // the hyperparameters of the architecture (the blueprint)
     pub weights: TransformerWeights<'a>, // the weights of the model
+    pub backing_weights: Option<Vec<f32>>,
     pub state: RunState, // buffers for the "wave" of activations in the forward pass
     // some more state needed to properly clean up the memory mapping (sigh)
     pub fd: i32,        // file descriptor for memory mapping
@@ -132,7 +133,7 @@ pub fn memory_map_weights<'a>(
 
     // Skip the two RoPE tables (freq_cis_real/imag)
     let rope_skip = p.seq_len * head_size / 2; // each half
-    offset += rope_skip * 2; // skip both halves
+    offset += rope_skip as usize * 2; // skip both halves
 
     w.wcls = if shared_weights != 0 {
         w.token_embedding_table
@@ -144,7 +145,7 @@ pub fn memory_map_weights<'a>(
 pub fn read_checkpoint<'a>(
     checkpoint: &Path,
     weights_out: &'a mut TransformerWeights<'a>,
-) -> Result<Config> {
+) -> io::Result<(Config, Vec<f32>)> {
     let mut f = File::open(checkpoint)?;
 
     // get file size
@@ -155,12 +156,15 @@ pub fn read_checkpoint<'a>(
     let mut hdr = vec![0u8; size_of::<Config>()];
     f.read_exact(&mut hdr)?;
 
-    // can do this in one step if we change the type of the config fields in the struct from usize -> i32
-    let cfg =
+    let mut cfg =
         Config::from_le_bytes(&hdr).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let shared_weights = cfg.vocab_size > 0;
-    cfg.vocab_size = cfg.vocab_size.abs();
+    if (cfg.vocab_size < 0) {
+        cfg.vocab_size = cfg.vocab_size * -1
+    } else {
+        cfg.vocab_size = cfg.vocab_size
+    }
 
     // read payload
     let payload_bytes = (file_size as usize).saturating_sub(size_of::<Config>());
@@ -174,24 +178,38 @@ pub fn read_checkpoint<'a>(
     let mut raw = vec![0u8; payload_bytes];
     f.read_exact(&mut raw)?;
 
-    // bytes -> f32 (safe conversion)
+    // bytes -> f32
     let mut floats = Vec::<f32>::with_capacity(payload_bytes / 4);
     for chunk in raw.chunks_exact(4) {
         floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
 
-    // keep storage alive (own it somewhere; demo uses a leak to keep lifetimes simple)
-    let boxed: Box<[f32]> = floats.into_boxed_slice();
-    let all_f32: &'static [f32] = Box::leak(boxed);
+    let slice: &[f32] = &floats;
+    memory_map_weights(weights_out, &cfg, slice, shared_weights as i32);
 
-    memory_map_weights(weights_out, &cfg, all_f32, shared_weights as i32);
-
-    Ok(cfg)
+    // return cfg + the owned buffer so the caller keeps it alive
+    Ok((cfg, floats))
 }
 
-//TODO: update this here to alignw ith C implementation
-fn build_transformer(transformer: &Transformer, checkpoint_path: &str) {
-    read_checkpoint(checkpoint, weights_out)
+fn build_transformer<'a>(t: &'a mut Transformer<'a>, checkpoint_path: &str) -> io::Result<()> {
+    let path = Path::new(checkpoint_path);
+
+    // 1) Let read_checkpoint wire slices (temporarily) and return the owned buffer
+    let (cfg, floats) = read_checkpoint(path, &mut t.weights)?;
+
+    // 2) Keep the owned buffer alive on `t`
+    t.backing_weights = Some(floats);
+
+    // 3) Rewire slices to unequivocally point into the buffer that `t` owns
+    //    (this removes the ambiguity that caused the lifetime error)
+    let all_f32: &[f32] = t.backing_weights.as_ref().unwrap().as_slice();
+
+    // Note: shared weights flag mirrors your C logic
+    let shared_weights = (cfg.vocab_size > 0) as i32;
+
+    memory_map_weights(&mut t.weights, &cfg, all_f32, shared_weights);
+
+    Ok(())
 }
 
 fn main() {
