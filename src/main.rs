@@ -4,6 +4,8 @@ use std::{
     path::Path,
 };
 
+use memmap2::Mmap;
+
 pub struct Config {
     pub dim: i32,
     pub hidden_dim: i32,
@@ -81,11 +83,12 @@ pub struct RunState {
 pub struct Transformer<'a> {
     pub config: Config, // the hyperparameters of the architecture (the blueprint)
     pub weights: TransformerWeights<'a>, // the weights of the model
-    pub state: RunState, // buffers for the "wave" of activations in the forward pass
-    // some more state needed to properly clean up the memory mapping (sigh)
-    pub fd: i32,        // file descriptor for memory mapping
-    pub data: Vec<f32>, // memory mapped data pointer
-    pub file_size: i32, // size of the checkpoint file in bytes
+    pub _mmap: Mmap,
+    // pub state: RunState, // buffers for the "wave" of activations in the forward pass
+    // // some more state needed to properly clean up the memory mapping (sigh)
+    // pub fd: i32,        // file descriptor for memory mapping
+    // pub data: Vec<f32>, // memory mapped data pointer
+    // pub file_size: i32, // size of the checkpoint file in bytes
 }
 
 pub fn memory_map_weights<'a>(
@@ -141,30 +144,86 @@ pub fn memory_map_weights<'a>(
     };
 }
 
-pub fn read_checkpoint<'a>(
-    checkpoint: &Path,
-    weights_out: &'a mut TransformerWeights<'a>,
-) -> io::Result<Config> {
-    // get file from checkpoint path
-    let mut f = File::open(checkpoint)?;
+// pub fn read_checkpoint<'a>(
+//     checkpoint: &Path,
+//     weights_out: &'a mut TransformerWeights<'a>,
+// ) -> io::Result<Config> {
+//     // get file from checkpoint path
+//     let mut f = File::open(checkpoint)?;
 
-    // get file size
-    let file_size = f.seek(SeekFrom::End(0))?;
+//     // get file size
+//     let file_size = f.seek(SeekFrom::End(0))?;
 
-    // go to the byte at the 0th offset position aka the beginning of the file
-    f.seek(SeekFrom::Start(0))?;
+//     // go to the byte at the 0th offset position aka the beginning of the file
+//     f.seek(SeekFrom::Start(0))?;
 
-    // initialize slice the size of the header
-    let mut hdr = vec![0u8; size_of::<Config>()];
+//     // initialize slice the size of the header
+//     let mut hdr = vec![0u8; size_of::<Config>()];
 
-    // reads in the exact number of bytes to fill in the hdr buffer
-    f.read_exact(&mut hdr)?;
+//     // reads in the exact number of bytes to fill in the hdr buffer
+//     f.read_exact(&mut hdr)?;
 
-    //assigns the bytes from the header to the config struct fields
-    let mut cfg =
-        Config::from_le_bytes(&hdr).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+//     //assigns the bytes from the header to the config struct fields
+//     let mut cfg =
+//         Config::from_le_bytes(&hdr).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    // negative vocab size is hacky way of signaling unshared weights. bit yikes.
+//     // negative vocab size is hacky way of signaling unshared weights. bit yikes.
+//     let shared_weights = cfg.vocab_size > 0;
+//     if cfg.vocab_size < 0 {
+//         cfg.vocab_size = cfg.vocab_size * -1
+//     } else {
+//         cfg.vocab_size = cfg.vocab_size
+//     }
+
+//     // calculate how many bytes of weights after the header are in the file by subtracting the size of the header from the file size
+//     let payload_bytes = (file_size as usize).saturating_sub(size_of::<Config>());
+//     if payload_bytes % 4 != 0 {
+//         return Err(io::Error::new(
+//             io::ErrorKind::InvalidData,
+//             "weights length not multiple of 4",
+//         ));
+//     }
+
+//     // create a slice that size of the weight bytes
+//     let mut raw = vec![0u8; payload_bytes];
+
+//     // fills the slice with the bytes from the file
+//     f.read_exact(&mut raw)?;
+
+//     // creats a vector to hold the f32 weights
+//     let mut floats = Vec::<f32>::with_capacity(payload_bytes / 4);
+
+//     // converts the bytes into weights
+//     for chunk in raw.chunks_exact(4) {
+//         floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+//     }
+
+//     // the floats need to live for the lifetime of the progra otherwise they will be dropped since floats is a local variable - this is because the memory_map_weights take in slices which just borrow data (if they were vectors they would own the data and we wouldn't see this issue) but im trying to keep it similar to teh C implementation
+//     // so we use leak to keep the storage alive and fix the lifetime issue
+//     let slice: &'static [f32] = Box::leak(floats.into_boxed_slice());
+//     memory_map_weights(weights_out, &cfg, slice, shared_weights as i32);
+
+//     Ok(cfg)
+// }
+
+pub fn read_checkpoint(checkpoint: &Path) -> io::Result<(Config, Mmap, bool)> {
+    // Open file and create memory map
+    let file = File::open(checkpoint)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+
+    // Validate minimum size
+    if mmap.len() < size_of::<Config>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "File too small for config header",
+        ));
+    }
+
+    // Read config from the beginning of the mmap
+    let config_bytes = &mmap[0..size_of::<Config>()];
+    let mut cfg = Config::from_le_bytes(config_bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
     let shared_weights = cfg.vocab_size > 0;
     if cfg.vocab_size < 0 {
         cfg.vocab_size = cfg.vocab_size * -1
@@ -172,8 +231,8 @@ pub fn read_checkpoint<'a>(
         cfg.vocab_size = cfg.vocab_size
     }
 
-    // calculate how many bytes of weights after the header are in the file by subtracting the size of the header from the file size
-    let payload_bytes = (file_size as usize).saturating_sub(size_of::<Config>());
+    // Validate payload size
+    let payload_bytes = mmap.len().saturating_sub(size_of::<Config>());
     if payload_bytes % 4 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -181,33 +240,32 @@ pub fn read_checkpoint<'a>(
         ));
     }
 
-    // create a slice that size of the weight bytes
-    let mut raw = vec![0u8; payload_bytes];
-
-    // fills the slice with the bytes from the file
-    f.read_exact(&mut raw)?;
-
-    // creats a vector to hold the f32 weights
-    let mut floats = Vec::<f32>::with_capacity(payload_bytes / 4);
-
-    // converts the bytes into weights
-    for chunk in raw.chunks_exact(4) {
-        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-
-    // the floats need to live for the lifetime of the progra otherwise they will be dropped since floats is a local variable - this is because the memory_map_weights take in slices which just borrow data (if they were vectors they would own the data and we wouldn't see this issue) but im trying to keep it similar to teh C implementation
-    // so we use leak to keep the storage alive and fix the lifetime issue
-    let slice: &'static [f32] = Box::leak(floats.into_boxed_slice());
-    memory_map_weights(weights_out, &cfg, slice, shared_weights as i32);
-
-    Ok(cfg)
+    Ok((cfg, mmap, shared_weights))
 }
 
-fn build_transformer<'a>(t: &'a mut Transformer<'a>, checkpoint_path: &str) -> io::Result<()> {
+fn build_transformer(checkpoint_path: &str, t: &mut Transformer) {
     let path = Path::new(checkpoint_path);
-    let _cfg = read_checkpoint(path, &mut t.weights)?;
-    Ok(())
+    let (cfg, mmap, sw) = read_checkpoint(path).unwrap();
+
+    // Get the weights data from the mmap
+    let weights_bytes = &mmap[size_of::<Config>()..];
+
+    // Convert bytes to f32 slice (this is safe because we validated alignment)
+    let weights_data: &[f32] = unsafe {
+        std::slice::from_raw_parts(
+            weights_bytes.as_ptr() as *const f32,
+            weights_bytes.len() / 4,
+        )
+    };
+
+    memory_map_weights(&mut t.weights, &cfg, weights_data, sw as i32);
 }
+
+// fn build_transformer<'a>(t: &'a mut Transformer<'a>, checkpoint_path: &str) -> io::Result<()> {
+//     let path = Path::new(checkpoint_path);
+//     let _cfg = read_checkpoint(path, &mut t.weights)?;
+//     Ok(())
+// }
 
 fn main() {
     println!("Hello, world!");
