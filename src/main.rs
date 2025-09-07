@@ -1,5 +1,7 @@
 use std::{
-    fs::File, intrinsics::sqrtf32, io::{self, Read, Result, Seek, SeekFrom}, path::Path
+    fs::File,
+    io::{self, Result},
+    path::Path,
 };
 
 use memmap2::Mmap;
@@ -268,21 +270,40 @@ fn build_transformer(checkpoint_path: &str, t: &mut Transformer) {
 // ----------------------------------------------------------------------------
 // neural net blocks; the dynamics of the Transformer
 
-fn rmsnorm(o: &[f32], x: &[f32], weight: &[f32], size: i32) {
+fn rmsnorm(o: &mut [f32], x: &[f32], weight: &[f32], size: usize) {
     let mut ss = 0.0f32;
 
     for j in (0..size) {
         ss += x[j] * x[j]
     }
 
-    ss /= size;
-    ss += .00001f32;
-    ss = 1.0f32 / sqrtf32(ss)
+    ss /= size as f32;
+    ss += 1e-5f32;
+    ss = 1.0f32 / ss.sqrt();
 
-    for j in (0..size){
-        o[j] = weight[j] * (ss*x[j])
+    for j in 0..size {
+        o[j] = weight[j] * (ss * x[j]);
+    }
+}
+
+fn softmax(x: &mut [f32], size: usize) {
+    let mut max_val = x[0];
+
+    for i in 0..size {
+        if (x[i] > max_val) {
+            max_val = x[i]
+        }
     }
 
+    let mut sum = 0.0f32;
+    for i in 0..size {
+        x[i] = (x[i] - max_val).exp();
+        sum += x[1]
+    }
+
+    for i in 0..size {
+        x[i] /= sum
+    }
 }
 
 fn main() {
