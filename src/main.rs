@@ -1,7 +1,5 @@
 use std::{
-    fs::File,
-    io::{self, Read, Result, Seek, SeekFrom},
-    path::Path,
+    fs::File, intrinsics::sqrtf32, io::{self, Read, Result, Seek, SeekFrom}, path::Path
 };
 
 use memmap2::Mmap;
@@ -206,6 +204,12 @@ pub fn memory_map_weights<'a>(
 //     Ok(cfg)
 // }
 
+// fn build_transformer<'a>(t: &'a mut Transformer<'a>, checkpoint_path: &str) -> io::Result<()> {
+//     let path = Path::new(checkpoint_path);
+//     let _cfg = read_checkpoint(path, &mut t.weights)?;
+//     Ok(())
+// }
+
 pub fn read_checkpoint(checkpoint: &Path) -> io::Result<(Config, Mmap, bool)> {
     // Open file and create memory map
     let file = File::open(checkpoint)?;
@@ -261,11 +265,25 @@ fn build_transformer(checkpoint_path: &str, t: &mut Transformer) {
     memory_map_weights(&mut t.weights, &cfg, weights_data, sw as i32);
 }
 
-// fn build_transformer<'a>(t: &'a mut Transformer<'a>, checkpoint_path: &str) -> io::Result<()> {
-//     let path = Path::new(checkpoint_path);
-//     let _cfg = read_checkpoint(path, &mut t.weights)?;
-//     Ok(())
-// }
+// ----------------------------------------------------------------------------
+// neural net blocks; the dynamics of the Transformer
+
+fn rmsnorm(o: &[f32], x: &[f32], weight: &[f32], size: i32) {
+    let mut ss = 0.0f32;
+
+    for j in (0..size) {
+        ss += x[j] * x[j]
+    }
+
+    ss /= size;
+    ss += .00001f32;
+    ss = 1.0f32 / sqrtf32(ss)
+
+    for j in (0..size){
+        o[j] = weight[j] * (ss*x[j])
+    }
+
+}
 
 fn main() {
     println!("Hello, world!");
