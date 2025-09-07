@@ -200,11 +200,10 @@ pub fn read_checkpoint<'a>(
     let slice: &'static [f32] = Box::leak(floats.into_boxed_slice());
     memory_map_weights(weights_out, &cfg, slice, shared_weights as i32);
 
-    // return cfg
     Ok(cfg)
 }
 
-fn build_transformer(t: &mut Transformer, checkpoint_path: &str) -> io::Result<()> {
+fn build_transformer<'a>(t: &'a mut Transformer<'a>, checkpoint_path: &str) -> io::Result<()> {
     let path = Path::new(checkpoint_path);
     let _cfg = read_checkpoint(path, &mut t.weights)?;
     Ok(())
