@@ -81,7 +81,6 @@ pub struct RunState {
 pub struct Transformer<'a> {
     pub config: Config, // the hyperparameters of the architecture (the blueprint)
     pub weights: TransformerWeights<'a>, // the weights of the model
-    pub backing_weights: Option<Vec<f32>>,
     pub state: RunState, // buffers for the "wave" of activations in the forward pass
     // some more state needed to properly clean up the memory mapping (sigh)
     pub fd: i32,        // file descriptor for memory mapping
@@ -191,24 +190,9 @@ pub fn read_checkpoint<'a>(
     Ok((cfg, floats))
 }
 
-fn build_transformer<'a>(t: &'a mut Transformer<'a>, checkpoint_path: &str) -> io::Result<()> {
+fn build_transformer(t: &mut Transformer, checkpoint_path: &str) -> io::Result<()> {
     let path = Path::new(checkpoint_path);
-
-    // 1) Let read_checkpoint wire slices (temporarily) and return the owned buffer
-    let (cfg, floats) = read_checkpoint(path, &mut t.weights)?;
-
-    // 2) Keep the owned buffer alive on `t`
-    t.backing_weights = Some(floats);
-
-    // 3) Rewire slices to unequivocally point into the buffer that `t` owns
-    //    (this removes the ambiguity that caused the lifetime error)
-    let all_f32: &[f32] = t.backing_weights.as_ref().unwrap().as_slice();
-
-    // Note: shared weights flag mirrors your C logic
-    let shared_weights = (cfg.vocab_size > 0) as i32;
-
-    memory_map_weights(&mut t.weights, &cfg, all_f32, shared_weights);
-
+    let (_cfg, floats) = read_checkpoint(path, &mut t.weights)?;
     Ok(())
 }
 
