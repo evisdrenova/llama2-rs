@@ -1,5 +1,3 @@
-// a port of karpathy's llama2.c in pure rust
-
 use std::{
     fs::File,
     io::{self, Read, Result, Seek, SeekFrom},
@@ -7,33 +5,21 @@ use std::{
 };
 
 pub struct Config {
-    pub dim: usize,
-    pub hidden_dim: usize,
-    pub n_layers: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
+    pub dim: i32,
+    pub hidden_dim: i32,
+    pub n_layers: i32,
+    pub n_heads: i32,
+    pub n_kv_heads: i32,
     pub vocab_size: i32,
-    pub seq_len: usize,
+    pub seq_len: i32,
 }
 
-// header is parsed into this. we could make the config have i32 fields but it messes up the memory map weights function which deals with usizes, maybe come back later an dupdate it adn then we can get rid of this struct
-#[derive(Debug, Clone, Copy)]
-struct DiskConfig {
-    dim: i32,
-    hidden_dim: i32,
-    n_layers: i32,
-    n_heads: i32,
-    n_kv_heads: i32,
-    vocab_size: i32, // may be NEGATIVE in file to signal "unshared"
-    seq_len: i32,
-}
-
-impl DiskConfig {
-    /// Parse from a raw little-endian byte buffer
+impl Config {
+    /// used to parse checkpoint header from a raw little-endian byte buffer into Config struct
     fn from_le_bytes(hdr: &[u8]) -> Result<Self> {
-        let need = size_of::<DiskConfig>();
+        let need = size_of::<Config>();
         if hdr.len() < need {
-            println!("header is too small")
+            println!("header too small: have {}, need {}", hdr.len(), need)
         }
         let mut off = 0usize;
         let mut next_i32 = || {
@@ -115,16 +101,16 @@ pub fn memory_map_weights<'a>(
 
     //take a slice of floats starting at offset and advance the offset so that the next call starts after it. this is functionally equivaletn to using a raw pointer to hop around the weights array
     //No data are moved, the slice is just a new pair (pointer, length)
-    fn take<'a>(buffer: &'a [f32], offset: &mut usize, size: usize) -> &'a [f32] {
+    fn take<'a>(buffer: &'a [f32], offset: &mut usize, size: i32) -> &'a [f32] {
         let start = *offset;
-        let end = start + size;
-        // safety: the caller guarantees that `buffer` is large enough.
+        let end = start + size as usize;
+        // we guarantee that `buffer` is large enough.
         let slice = &buffer[start..end];
         *offset = end;
         slice
     }
 
-    w.token_embedding_table = take(ptr, &mut offset, p.vocab_size as usize * p.dim);
+    w.token_embedding_table = take(ptr, &mut offset, p.vocab_size * p.dim);
     w.rms_att_weight = take(ptr, &mut offset, n_layers * p.dim);
     w.wq = take(ptr, &mut offset, n_layers * p.dim * (p.n_heads * head_size));
     w.wk = take(
@@ -151,7 +137,7 @@ pub fn memory_map_weights<'a>(
     w.wcls = if shared_weights != 0 {
         w.token_embedding_table
     } else {
-        take(ptr, &mut offset, p.vocab_size as usize * p.dim)
+        take(ptr, &mut offset, p.vocab_size * p.dim)
     };
 }
 
@@ -166,20 +152,18 @@ pub fn read_checkpoint<'a>(
     f.seek(SeekFrom::Start(0))?;
 
     // slice the size of the header
-    let mut hdr = vec![0u8; size_of::<DiskConfig>()];
+    let mut hdr = vec![0u8; size_of::<Config>()];
     f.read_exact(&mut hdr)?;
 
     // can do this in one step if we change the type of the config fields in the struct from usize -> i32
-    let disk = DiskConfig::from_le_bytes(&hdr)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let (mut cfg, shared) =
-        to_runtime_config(disk).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let cfg =
+        Config::from_le_bytes(&hdr).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let shared_weights = cfg.vocab_size > 0;
     cfg.vocab_size = cfg.vocab_size.abs();
 
     // read payload
-    let payload_bytes = (file_size as usize).saturating_sub(size_of::<DiskConfig>());
+    let payload_bytes = (file_size as usize).saturating_sub(size_of::<Config>());
     if payload_bytes % 4 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -205,32 +189,9 @@ pub fn read_checkpoint<'a>(
     Ok(cfg)
 }
 
-fn to_runtime_config(disk: DiskConfig) -> Result<(Config, bool)> {
-    // negative vocab means "unshared" in the legacy format; take absolute for value
-    let shared_weights = disk.vocab_size > 0;
-    let vocab_abs = disk.vocab_size.abs();
-
-    // Ensure all fields are non-negative and fit into usize
-    fn cast(n: i32, name: &str) -> Result<usize> {
-        if n < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "field must be >= 0",
-            ));
-        }
-        Ok(n as usize)
-    }
-
-    let cfg = Config {
-        dim: cast(disk.dim, "dim")?,
-        hidden_dim: cast(disk.hidden_dim, "hidden_dim")?,
-        n_layers: cast(disk.n_layers, "n_layers")?,
-        n_heads: cast(disk.n_heads, "n_heads")?,
-        n_kv_heads: cast(disk.n_kv_heads, "n_kv_heads")?,
-        vocab_size: vocab_abs,
-        seq_len: cast(disk.seq_len, "seq_len")?,
-    };
-    Ok((cfg, shared_weights))
+//TODO: update this here to alignw ith C implementation
+fn build_transformer(transformer: &Transformer, checkpoint_path: &str) {
+    read_checkpoint(checkpoint, weights_out)
 }
 
 fn main() {
