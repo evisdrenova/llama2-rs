@@ -144,28 +144,35 @@ pub fn memory_map_weights<'a>(
 pub fn read_checkpoint<'a>(
     checkpoint: &Path,
     weights_out: &'a mut TransformerWeights<'a>,
-) -> io::Result<(Config, Vec<f32>)> {
+) -> io::Result<Config> {
+    // get file from checkpoint path
     let mut f = File::open(checkpoint)?;
 
     // get file size
     let file_size = f.seek(SeekFrom::End(0))?;
+
+    // go to the byte at the 0th offset position aka the beginning of the file
     f.seek(SeekFrom::Start(0))?;
 
-    // slice the size of the header
+    // initialize slice the size of the header
     let mut hdr = vec![0u8; size_of::<Config>()];
+
+    // reads in the exact number of bytes to fill in the hdr buffer
     f.read_exact(&mut hdr)?;
 
+    //assigns the bytes from the header to the config struct fields
     let mut cfg =
         Config::from_le_bytes(&hdr).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
+    // negative vocab size is hacky way of signaling unshared weights. bit yikes.
     let shared_weights = cfg.vocab_size > 0;
-    if (cfg.vocab_size < 0) {
+    if cfg.vocab_size < 0 {
         cfg.vocab_size = cfg.vocab_size * -1
     } else {
         cfg.vocab_size = cfg.vocab_size
     }
 
-    // read payload
+    // calculate how many bytes of weights after the header are in the file by subtracting the size of the header from the file size
     let payload_bytes = (file_size as usize).saturating_sub(size_of::<Config>());
     if payload_bytes % 4 != 0 {
         return Err(io::Error::new(
@@ -174,25 +181,32 @@ pub fn read_checkpoint<'a>(
         ));
     }
 
+    // create a slice that size of the weight bytes
     let mut raw = vec![0u8; payload_bytes];
+
+    // fills the slice with the bytes from the file
     f.read_exact(&mut raw)?;
 
-    // bytes -> f32
+    // creats a vector to hold the f32 weights
     let mut floats = Vec::<f32>::with_capacity(payload_bytes / 4);
+
+    // converts the bytes into weights
     for chunk in raw.chunks_exact(4) {
         floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
 
-    let slice: &[f32] = &floats;
+    // the floats need to live for the lifetime of the progra otherwise they will be dropped since floats is a local variable - this is because the memory_map_weights take in slices which just borrow data (if they were vectors they would own the data and we wouldn't see this issue) but im trying to keep it similar to teh C implementation
+    // so we use leak to keep the storage alive and fix the lifetime issue
+    let slice: &'static [f32] = Box::leak(floats.into_boxed_slice());
     memory_map_weights(weights_out, &cfg, slice, shared_weights as i32);
 
-    // return cfg + the owned buffer so the caller keeps it alive
-    Ok((cfg, floats))
+    // return cfg
+    Ok(cfg)
 }
 
 fn build_transformer(t: &mut Transformer, checkpoint_path: &str) -> io::Result<()> {
     let path = Path::new(checkpoint_path);
-    let (_cfg, floats) = read_checkpoint(path, &mut t.weights)?;
+    let _cfg = read_checkpoint(path, &mut t.weights)?;
     Ok(())
 }
 
