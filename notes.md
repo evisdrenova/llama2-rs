@@ -60,3 +60,9 @@ we should add an assrt here to make sure the ptr is at least as large as the sum
 ### read_checkpoint
 
 This is a helper function to load an external model so we can use it. We effectively, get a file, read it, and then pass it into our memory map function in order to initialize our model.
+
+//TODO: COMPLETE
+
+## Neural net blocks
+
+Then we start converting some nice pure functions to rust. RMSNorm, Softmax and the star of the show, matmil. These are the critical components to making our neural net work.

@@ -1,10 +1,10 @@
+use memmap2::Mmap;
+use rayon::prelude::*;
 use std::{
     fs::File,
     io::{self, Result},
     path::Path,
 };
-
-use memmap2::Mmap;
 
 pub struct Config {
     pub dim: i32,
@@ -84,11 +84,11 @@ pub struct Transformer<'a> {
     pub config: Config, // the hyperparameters of the architecture (the blueprint)
     pub weights: TransformerWeights<'a>, // the weights of the model
     pub _mmap: Mmap,
-    // pub state: RunState, // buffers for the "wave" of activations in the forward pass
-    // // some more state needed to properly clean up the memory mapping (sigh)
-    // pub fd: i32,        // file descriptor for memory mapping
-    // pub data: Vec<f32>, // memory mapped data pointer
-    // pub file_size: i32, // size of the checkpoint file in bytes
+    pub state: RunState, // buffers for the "wave" of activations in the forward pass
+                         // // some more state needed to properly clean up the memory mapping (sigh)
+                         // pub fd: i32,        // file descriptor for memory mapping
+                         // pub data: Vec<f32>, // memory mapped data pointer
+                         // pub file_size: i32, // size of the checkpoint file in bytes
 }
 
 pub fn memory_map_weights<'a>(
@@ -307,13 +307,28 @@ fn softmax(x: &mut [f32], size: usize) {
 }
 
 fn matmul(xout: &mut [f32], x: &mut [f32], w: &mut [f32], n: usize, d: usize) {
-    for i in 0..d {
+    xout.par_iter_mut().enumerate().for_each(|(i, out_val)| {
         let mut val = 0.0f32;
         for j in 0..n {
             val += w[i * n + j] * x[j];
         }
-        xout[i] = val;
-    }
+        *out_val = val;
+    });
+}
+
+fn forward(transformer: &Transformer, token: usize, pos: usize) -> Result<[f32]> {
+    let p: Config = transformer.config;
+    let w: TransformerWeights = transformer.weights;
+    let s: RunState = transformer.state;
+
+    let x = s.x;
+    let dim = p.dim;
+    let kv_dim = (p.dim * p.n_kv_heads) / p.n_heads;
+    let kv_mul = p.n_heads / p.n_kv_heads;
+    let hidden_dims = p.hidden_dim;
+    let head_size = dim / p.n_heads;
+
+    let content_row = w.token_embedding_table + token * dim;
 }
 
 fn main() {
