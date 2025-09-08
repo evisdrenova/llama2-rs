@@ -144,74 +144,6 @@ pub fn memory_map_weights<'a>(
     };
 }
 
-// pub fn read_checkpoint<'a>(
-//     checkpoint: &Path,
-//     weights_out: &'a mut TransformerWeights<'a>,
-// ) -> io::Result<Config> {
-//     // get file from checkpoint path
-//     let mut f = File::open(checkpoint)?;
-
-//     // get file size
-//     let file_size = f.seek(SeekFrom::End(0))?;
-
-//     // go to the byte at the 0th offset position aka the beginning of the file
-//     f.seek(SeekFrom::Start(0))?;
-
-//     // initialize slice the size of the header
-//     let mut hdr = vec![0u8; size_of::<Config>()];
-
-//     // reads in the exact number of bytes to fill in the hdr buffer
-//     f.read_exact(&mut hdr)?;
-
-//     //assigns the bytes from the header to the config struct fields
-//     let mut cfg =
-//         Config::from_le_bytes(&hdr).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-//     // negative vocab size is hacky way of signaling unshared weights. bit yikes.
-//     let shared_weights = cfg.vocab_size > 0;
-//     if cfg.vocab_size < 0 {
-//         cfg.vocab_size = cfg.vocab_size * -1
-//     } else {
-//         cfg.vocab_size = cfg.vocab_size
-//     }
-
-//     // calculate how many bytes of weights after the header are in the file by subtracting the size of the header from the file size
-//     let payload_bytes = (file_size as usize).saturating_sub(size_of::<Config>());
-//     if payload_bytes % 4 != 0 {
-//         return Err(io::Error::new(
-//             io::ErrorKind::InvalidData,
-//             "weights length not multiple of 4",
-//         ));
-//     }
-
-//     // create a slice that size of the weight bytes
-//     let mut raw = vec![0u8; payload_bytes];
-
-//     // fills the slice with the bytes from the file
-//     f.read_exact(&mut raw)?;
-
-//     // creats a vector to hold the f32 weights
-//     let mut floats = Vec::<f32>::with_capacity(payload_bytes / 4);
-
-//     // converts the bytes into weights
-//     for chunk in raw.chunks_exact(4) {
-//         floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-//     }
-
-//     // the floats need to live for the lifetime of the progra otherwise they will be dropped since floats is a local variable - this is because the memory_map_weights take in slices which just borrow data (if they were vectors they would own the data and we wouldn't see this issue) but im trying to keep it similar to teh C implementation
-//     // so we use leak to keep the storage alive and fix the lifetime issue
-//     let slice: &'static [f32] = Box::leak(floats.into_boxed_slice());
-//     memory_map_weights(weights_out, &cfg, slice, shared_weights as i32);
-
-//     Ok(cfg)
-// }
-
-// fn build_transformer<'a>(t: &'a mut Transformer<'a>, checkpoint_path: &str) -> io::Result<()> {
-//     let path = Path::new(checkpoint_path);
-//     let _cfg = read_checkpoint(path, &mut t.weights)?;
-//     Ok(())
-// }
-
 pub fn read_checkpoint(checkpoint: &Path) -> io::Result<(Config, Mmap, bool)> {
     // Open file and create memory map
     let file = File::open(checkpoint)?;
@@ -317,73 +249,76 @@ fn matmul(xout: &mut [f32], x: &mut [f32], w: &mut [f32], n: usize, d: usize) {
 }
 
 fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'a [f32] {
-    let p: Config = transformer.config;
-    let w: TransformerWeights = transformer.weights;
-    let s: RunState = transformer.state;
+    let p = &transformer.config;
+    let w = &transformer.weights;
+    let s = &mut transformer.state;
 
-    let x = s.x;
-    let dim = p.dim;
-    let kv_dim = (p.dim * p.n_kv_heads) / p.n_heads;
-    let kv_mul = p.n_heads / p.n_kv_heads;
-    let hidden_dims = p.hidden_dim;
-    let head_size = dim / p.n_heads;
+    // calc dims for forward pass
+    let dim = p.dim as usize;
+    let kv_dim = ((p.dim * p.n_kv_heads) / p.n_heads) as usize;
+    let kv_mul = (p.n_heads / p.n_kv_heads) as usize;
+    let hidden_dim = p.hidden_dim as usize;
+    let head_size = (p.dim / p.n_heads) as usize;
 
     // copy the token embedding into x
-    let start = token * (dim as usize);
-    let end = start + (dim as usize);
+    let start = token * dim;
+    let end = start + dim;
     let content_row = &w.token_embedding_table[start..end];
-
-    x[..dim as usize].copy_from_slice(&content_row[..dim as usize]);
+    s.x[..dim].copy_from_slice(&content_row[..dim]);
 
     // forward all the layers
     for l in 0..p.n_layers as usize {
         // attention rmsnorm
-        let rms_offset = l * dim as usize;
-        let rms_weights = &w.rms_att_weight[rms_offset..rms_offset + dim as usize];
-        rmsnorm(&mut s.xb, &x, rms_weights, dim);
+        let rms_offset = l * dim;
+        let rms_weights = &w.rms_att_weight[rms_offset..rms_offset + dim];
+        rmsnorm(&mut s.xb, &s.x, rms_weights, p.dim);
 
         // key and value point to the kv cache
-        let loff = l * p.seq_len as usize * kv_dim as usize; // kv cache layer offset for convenience
-        let k_start = loff + pos * kv_dim as usize;
-        let v_start = loff + pos * kv_dim as usize;
-
-        let (k_slice, v_slice) = {
-            let k_end = k_start + kv_dim as usize;
-            let v_end = v_start + kv_dim as usize;
-            (
-                &mut s.key_cache[k_start..k_end],
-                &mut s.value_cache[v_start..v_end],
-            )
-        };
-
-        s.k = k_slice;
-        s.v = v_slice;
+        let loff = l * p.seq_len as usize * kv_dim; // kv cache layer offset for convenience
+        let k_start = loff + pos * kv_dim;
+        let v_start = loff + pos * kv_dim;
 
         // qkv matmuls for this position
-        let wq_offset = l * dim as usize * dim as usize;
-        let wk_offset = l * dim as usize * kv_dim as usize;
-        let wv_offset = l * dim as usize * kv_dim as usize;
+        let wq_offset = l * dim * dim;
+        let wk_offset = l * dim * kv_dim;
+        let wv_offset = l * dim * kv_dim;
 
-        let wq_slice = &w.wq[wq_offset..wq_offset + dim as usize * dim as usize];
-        let wk_slice = &w.wk[wk_offset..wk_offset + dim as usize * kv_dim as usize];
-        let wv_slice = &w.wv[wv_offset..wv_offset + dim as usize * kv_dim as usize];
+        let wq_slice = &w.wq[wq_offset..wq_offset + dim * dim];
+        let wk_slice = &w.wk[wk_offset..wk_offset + dim * kv_dim];
+        let wv_slice = &w.wv[wv_offset..wv_offset + dim * kv_dim];
 
-        matmul(&mut s.q, &s.xb, wq_slice, dim as usize, dim as usize);
-        matmul(s.k, &s.xb, wk_slice, dim as usize, kv_dim as usize);
-        matmul(s.v, &s.xb, wv_slice, dim as usize, kv_dim as usize);
+        matmul(&mut s.q, &s.xb, wq_slice, dim, dim);
+        matmul(
+            &mut s.key_cache[k_start..k_start + kv_dim],
+            &s.xb,
+            wk_slice,
+            dim,
+            kv_dim,
+        );
+        matmul(
+            &mut s.value_cache[v_start..v_start + kv_dim],
+            &s.xb,
+            wv_slice,
+            dim,
+            kv_dim,
+        );
 
         // RoPE relative positional encoding: complex-valued rotate q and k in each head
         let mut i = 0;
-        while i < dim as usize {
-            let head_dim = (i % head_size as usize) as f32;
+        while i < dim {
+            let head_dim = (i % head_size) as f32;
             let freq = 1.0f32 / 10000.0f32.powf(head_dim / head_size as f32);
             let val = pos as f32 * freq;
             let fcr = val.cos();
             let fci = val.sin();
-            let rotn = if i < kv_dim as usize { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
+            let rotn = if i < kv_dim { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
 
             for v in 0..rotn {
-                let vec = if v == 0 { &mut s.q } else { s.k }; // the vector to rotate (query or key)
+                let vec = if v == 0 {
+                    &mut s.q
+                } else {
+                    &mut s.key_cache[k_start..k_start + kv_dim]
+                }; // the vector to rotate (query or key)
                 let v0 = vec[i];
                 let v1 = vec[i + 1];
                 vec[i] = v0 * fcr - v1 * fci;
@@ -392,9 +327,120 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
 
             i += 2;
         }
+
+        // multihead attention. iterate over all heads
+        for h in 0..p.n_heads as usize {
+            // get the query vector for this head
+            let q_start = h * head_size;
+            let q_slice = &s.q[q_start..q_start + head_size];
+
+            // attention scores for this head
+            let att_start = h * p.seq_len as usize;
+            let att_slice = &mut s.att[att_start..att_start + p.seq_len as usize];
+
+            // iterate over all timesteps, including the current one
+            for t in 0..=pos {
+                // get the key vector for this head and at this timestep
+                let k_offset = loff + t * kv_dim + (h / kv_mul) * head_size;
+                let k_slice = &s.key_cache[k_offset..k_offset + head_size];
+
+                // calculate the attention score as the dot product of q and k
+                let mut score = 0.0f32;
+                for i in 0..head_size {
+                    score += q_slice[i] * k_slice[i];
+                }
+                score /= (head_size as f32).sqrt();
+
+                // save the score to the attention buffer
+                att_slice[t] = score;
+            }
+
+            // softmax the scores to get attention weights, from 0..pos inclusively
+            softmax(&mut att_slice[0..=pos], pos + 1);
+
+            // weighted sum of the values, store back into xb
+            let xb_start = h * head_size;
+            let xb_slice = &mut s.xb[xb_start..xb_start + head_size];
+
+            // zero out the slice
+            for val in xb_slice.iter_mut() {
+                *val = 0.0;
+            }
+
+            for t in 0..=pos {
+                // get the value vector for this head and at this timestep
+                let v_offset = loff + t * kv_dim + (h / kv_mul) * head_size;
+                let v_slice = &s.value_cache[v_offset..v_offset + head_size];
+
+                // get the attention weight for this timestep
+                let a = att_slice[t];
+
+                // accumulate the weighted value into xb
+                for i in 0..head_size {
+                    xb_slice[i] += a * v_slice[i];
+                }
+            }
+        }
+
+        // final matmul to get the output of the attention
+        let wo_offset = l * dim * dim;
+        let wo_slice = &w.wo[wo_offset..wo_offset + dim * dim];
+        matmul(&mut s.xb2, &s.xb, wo_slice, dim, dim);
+
+        // residual connection back into x
+        for i in 0..dim {
+            s.x[i] += s.xb2[i];
+        }
+
+        // ffn rmsnorm
+        let rms_ffn_offset = l * dim;
+        let rms_ffn_weights = &w.rms_ffn_weight[rms_ffn_offset..rms_ffn_offset + dim];
+        rmsnorm(&mut s.xb, &s.x, rms_ffn_weights, p.dim);
+
+        // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
+        // first calculate self.w1(x) and self.w3(x)
+        let w1_offset = l * dim * hidden_dim;
+        let w3_offset = l * dim * hidden_dim;
+        let w1_slice = &w.w1[w1_offset..w1_offset + dim * hidden_dim];
+        let w3_slice = &w.w3[w3_offset..w3_offset + dim * hidden_dim];
+
+        matmul(&mut s.hb, &s.xb, w1_slice, dim, hidden_dim);
+        matmul(&mut s.hb2, &s.xb, w3_slice, dim, hidden_dim);
+
+        // SwiGLU non-linearity
+        for i in 0..hidden_dim {
+            let mut val = s.hb[i];
+            // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
+            val *= 1.0f32 / (1.0f32 + (-val).exp());
+            // elementwise multiply with w3(x)
+            val *= s.hb2[i];
+            s.hb[i] = val;
+        }
+
+        // final matmul to get the output of the ffn
+        let w2_offset = l * dim * hidden_dim;
+        let w2_slice = &w.w2[w2_offset..w2_offset + dim * hidden_dim];
+        matmul(&mut s.xb, &s.hb, w2_slice, hidden_dim, dim);
+
+        // residual connection
+        for i in 0..dim {
+            s.x[i] += s.xb[i];
+        }
     }
 
-    // finish forward pass with multiheaded attention
+    // final rmsnorm
+    rmsnorm(&mut s.x, &s.x.clone(), &w.rms_final_weight, p.dim);
+
+    // classifier into logits
+    matmul(
+        &mut s.logits,
+        &s.x,
+        &w.wcls,
+        p.dim as usize,
+        p.vocab_size as usize,
+    );
+
+    &s.logits
 }
 
 fn main() {

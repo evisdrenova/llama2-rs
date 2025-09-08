@@ -63,7 +63,7 @@ This is a helper function to load an external model so we can use it. We effecti
 
 First, we open the file and map it into memory using mmamp. Then we validate that is has a minimum size before we read the config from the beginning of the memory mapped file using byte offsets to parse the different parts of the config.
 
-Lastly, we do some more validation and then return the config, memory mnapped file and the shared_weights bool.
+Lastly, we do some more validation and then return the config, memory mapped file and the shared_weights bool.
 
 In the build_transformer function, we run the read_checkpoint function to read in the file and then we get the weights data from the file and then memory map that to our `TransformerWeights` struct.
 
@@ -75,4 +75,36 @@ Then we start converting some nice pure functions to rust. RMSNorm, Softmax and 
 
 ## Forward
 
-This is the forward pass function that we use to pass through the neural net. There are a few things happening here so let's break them down step by step.
+This is the forward pass function that we use to pass through the neural net. Let's break this down.
+
+We're running inference for one token at a time at a specific position in the sequence. You can see this since we take in a `token` parameter.
+
+First, we extract some references to the config, weights and run state.
+
+```rust
+    let p = &transformer.config;
+    let w = &transformer.weights;
+    let s = &mut transformer.state;
+```
+
+Then, we compute the key dimensions that we will need in the forward pass.
+
+```rust
+    let x = s.x;
+    let dim = p.dim;
+    let kv_dim = (p.dim * p.n_kv_heads) / p.n_heads;
+    let kv_mul = p.n_heads / p.n_kv_heads;
+    let hidden_dims = p.hidden_dim;
+    let head_size = dim / p.n_heads;
+```
+
+Then we convert the input token ID to an embedding. The embedding table is `[vocab_size, dim]`, so we index it with `token*dim` to get the embedding for the specific token. The embedding table will be created later as part of the BPE section using the vocab.
+
+```rust
+    let start = token * dim;
+    let end = start + dim;
+    let content_row = &w.token_embedding_table[start..end];
+    s.x[..dim].copy_from_slice(&content_row[..dim]);
+```
+
+There is a main loop which loops over each transformer layer in in `p.n_layers`. This is
