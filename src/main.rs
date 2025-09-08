@@ -271,7 +271,7 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
         // attention rmsnorm
         let rms_offset = l * dim;
         let rms_weights = &w.rms_att_weight[rms_offset..rms_offset + dim];
-        rmsnorm(&mut s.xb, &s.x, rms_weights, p.dim);
+        rmsnorm(&mut s.xb, &s.x, rms_weights, p.dim as usize);
 
         // key and value point to the kv cache
         let loff = l * p.seq_len as usize * kv_dim; // kv cache layer offset for convenience

@@ -71,11 +71,11 @@ Now we have parsed the important bits from the file and loaded it into our struc
 
 ## Neural net blocks
 
-Then we start converting some nice pure functions to rust. RMSNorm, Softmax and the star of the show, matmul. These are pretty straight forward, simple implementations but are key components to the puzzle.
+Then we start converting some nice pure functions to rust. RMSNorm, Softmax and the star of the show, matmul. These are straight forward implementations but are key components to the puzzle.
 
 ## Forward
 
-This is the forward pass function that we use to pass through the neural net. Let's break this down.
+This is the forward pass function that we use to pass through the neural net. Let's break this down section by section.
 
 We're running inference for one token at a time at a specific position in the sequence. You can see this since we take in a `token` parameter.
 
@@ -107,4 +107,54 @@ Then we convert the input token ID to an embedding. The embedding table is `[voc
     s.x[..dim].copy_from_slice(&content_row[..dim]);
 ```
 
-There is a main loop which loops over each transformer layer in in `p.n_layers`. This is
+There is a main loop which loops over each transformer layer in in `p.n_layers`.
+
+```rust
+    for l in 0..p.n_layers as usize {
+    //...
+    }
+```
+
+Inside our loop, we first normalize the layers using root mean square normalization (RMSNorm), this helps to stabilize training.
+
+```rust
+    // attention rmsnorm
+    let rms_offset = l * dim;
+    let rms_weights = &w.rms_att_weight[rms_offset..rms_offset + dim];
+    rmsnorm(&mut s.xb, &s.x, rms_weights, p.dim as usize);
+```
+
+Next, we compute the Query, Key and Value vectors by multiplying the normalized input with the learned weight matrices.
+
+```rust
+   let loff = l * p.seq_len as usize * kv_dim; // kv cache layer offset for convenience
+        let k_start = loff + pos * kv_dim;
+        let v_start = loff + pos * kv_dim;
+
+        // qkv matmuls for this position
+        let wq_offset = l * dim * dim;
+        let wk_offset = l * dim * kv_dim;
+        let wv_offset = l * dim * kv_dim;
+
+        let wq_slice = &w.wq[wq_offset..wq_offset + dim * dim];
+        let wk_slice = &w.wk[wk_offset..wk_offset + dim * kv_dim];
+        let wv_slice = &w.wv[wv_offset..wv_offset + dim * kv_dim];
+
+        matmul(&mut s.q, &s.xb, wq_slice, dim, dim);
+        matmul(
+            &mut s.key_cache[k_start..k_start + kv_dim],
+            &s.xb,
+            wk_slice,
+            dim,
+            kv_dim,
+        );
+        matmul(
+            &mut s.value_cache[v_start..v_start + kv_dim],
+            &s.xb,
+            wv_slice,
+            dim,
+            kv_dim,
+        );
+```
+
+This is a critical part of our attention calculation and is what helps our LLM attend to each token in the sequence. It's a little more verbose than the C implementation but that's mainly for readability.
