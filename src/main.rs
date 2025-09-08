@@ -306,6 +306,16 @@ fn softmax(x: &mut [f32], size: usize) {
     }
 }
 
+fn matmul(xout: &mut [f32], x: &mut [f32], w: &mut [f32], n: usize, d: usize) {
+    for i in 0..d {
+        let mut val = 0.0f32;
+        for j in 0..n {
+            val += w[i * n + j] * x[j];
+        }
+        xout[i] = val;
+    }
+}
+
 fn main() {
     println!("Hello, world!");
 }
