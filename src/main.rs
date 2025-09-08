@@ -316,7 +316,7 @@ fn matmul(xout: &mut [f32], x: &mut [f32], w: &mut [f32], n: usize, d: usize) {
     });
 }
 
-fn forward(transformer: &Transformer, token: usize, pos: usize) -> Result<[f32]> {
+fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'a [f32] {
     let p: Config = transformer.config;
     let w: TransformerWeights = transformer.weights;
     let s: RunState = transformer.state;
@@ -328,7 +328,19 @@ fn forward(transformer: &Transformer, token: usize, pos: usize) -> Result<[f32]>
     let hidden_dims = p.hidden_dim;
     let head_size = dim / p.n_heads;
 
-    let content_row = w.token_embedding_table + token * dim;
+    // copy the token embedding into x
+    let start = token * (dim as usize);
+    let end = start + (dim as usize);
+    let content_row = &w.token_embedding_table[start..end];
+
+    x[..dim as usize].copy_from_slice(&content_row[..dim as usize]);
+
+    for l in 0..p.n_layers {
+        // attention rmsnorm
+        rmsnorm(s.xb, x, w.rms_att_weight + l * dim, dim);
+
+        let loff = l * p.seq_len * kv_dim;
+    }
 }
 
 fn main() {
