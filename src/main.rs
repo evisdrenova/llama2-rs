@@ -335,11 +335,63 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
 
     x[..dim as usize].copy_from_slice(&content_row[..dim as usize]);
 
-    for l in 0..p.n_layers {
+    // forward all the layers
+    for l in 0..p.n_layers as usize {
         // attention rmsnorm
-        rmsnorm(s.xb, x, w.rms_att_weight + l * dim, dim);
+        let rms_offset = l * dim as usize;
+        let rms_weights = &w.rms_att_weight[rms_offset..rms_offset + dim as usize];
+        rmsnorm(&mut s.xb, &x, rms_weights, dim);
 
-        let loff = l * p.seq_len * kv_dim;
+        // key and value point to the kv cache
+        let loff = l * p.seq_len as usize * kv_dim as usize; // kv cache layer offset for convenience
+        let k_start = loff + pos * kv_dim as usize;
+        let v_start = loff + pos * kv_dim as usize;
+
+        let (k_slice, v_slice) = {
+            let k_end = k_start + kv_dim as usize;
+            let v_end = v_start + kv_dim as usize;
+            (
+                &mut s.key_cache[k_start..k_end],
+                &mut s.value_cache[v_start..v_end],
+            )
+        };
+
+        s.k = k_slice;
+        s.v = v_slice;
+
+        // qkv matmuls for this position
+        let wq_offset = l * dim as usize * dim as usize;
+        let wk_offset = l * dim as usize * kv_dim as usize;
+        let wv_offset = l * dim as usize * kv_dim as usize;
+
+        let wq_slice = &w.wq[wq_offset..wq_offset + dim as usize * dim as usize];
+        let wk_slice = &w.wk[wk_offset..wk_offset + dim as usize * kv_dim as usize];
+        let wv_slice = &w.wv[wv_offset..wv_offset + dim as usize * kv_dim as usize];
+
+        matmul(&mut s.q, &s.xb, wq_slice, dim as usize, dim as usize);
+        matmul(s.k, &s.xb, wk_slice, dim as usize, kv_dim as usize);
+        matmul(s.v, &s.xb, wv_slice, dim as usize, kv_dim as usize);
+
+        // RoPE relative positional encoding: complex-valued rotate q and k in each head
+        let mut i = 0;
+        while i < dim as usize {
+            let head_dim = (i % head_size as usize) as f32;
+            let freq = 1.0f32 / 10000.0f32.powf(head_dim / head_size as f32);
+            let val = pos as f32 * freq;
+            let fcr = val.cos();
+            let fci = val.sin();
+            let rotn = if i < kv_dim as usize { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
+
+            for v in 0..rotn {
+                let vec = if v == 0 { &mut s.q } else { s.k }; // the vector to rotate (query or key)
+                let v0 = vec[i];
+                let v1 = vec[i + 1];
+                vec[i] = v0 * fcr - v1 * fci;
+                vec[i + 1] = v0 * fci + v1 * fcr;
+            }
+
+            i += 2;
+        }
     }
 }
 
