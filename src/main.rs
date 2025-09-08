@@ -393,6 +393,8 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
             i += 2;
         }
     }
+
+    // finish forward pass with multiheaded attention
 }
 
 fn main() {

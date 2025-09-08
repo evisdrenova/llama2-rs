@@ -57,12 +57,22 @@ The nice thing is that the buffer in the take is immutable so we don't have to w
 
 we should add an assrt here to make sure the ptr is at least as large as the sum of all the sizes calculated inside the function
 
-### read_checkpoint
+### read_checkpoint && build_transformer
 
 This is a helper function to load an external model so we can use it. We effectively, get a file, read it, and then pass it into our memory map function in order to initialize our model.
 
-//TODO: COMPLETE
+First, we open the file and map it into memory using mmamp. Then we validate that is has a minimum size before we read the config from the beginning of the memory mapped file using byte offsets to parse the different parts of the config.
+
+Lastly, we do some more validation and then return the config, memory mnapped file and the shared_weights bool.
+
+In the build_transformer function, we run the read_checkpoint function to read in the file and then we get the weights data from the file and then memory map that to our `TransformerWeights` struct.
+
+Now we have parsed the important bits from the file and loaded it into our structs so we can do stuff with them.
 
 ## Neural net blocks
 
-Then we start converting some nice pure functions to rust. RMSNorm, Softmax and the star of the show, matmil. These are the critical components to making our neural net work.
+Then we start converting some nice pure functions to rust. RMSNorm, Softmax and the star of the show, matmul. These are pretty straight forward, simple implementations but are key components to the puzzle.
+
+## Forward
+
+This is the forward pass function that we use to pass through the neural net. There are a few things happening here so let's break them down step by step.
