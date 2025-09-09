@@ -191,3 +191,70 @@ Next, we move onto our RoPE (rotary position encoding).
 
 Here we apply RoPE to inject position information into the Q and K vectors. This allows the model to understand relative positions of tokens.
 
+Okay, we're moving on! Now to the main attention bit. This is the core multi-headed attention mechanism.
+
+```rust
+    // multihead attention. iterate over all heads
+    for h in 0..p.n_heads as usize {
+        // get the query vector for this head
+        let q_start = h * head_size;
+        let q_slice = &s.q[q_start..q_start + head_size];
+
+        // attention scores for this head
+        let att_start = h * p.seq_len as usize;
+        let att_slice = &mut s.att[att_start..att_start + p.seq_len as usize];
+
+        // iterate over all timesteps, including the current one
+        for t in 0..=pos {
+            // get the key vector for this head and at this timestep
+            let k_offset = loff + t * kv_dim + (h / kv_mul) * head_size;
+            let k_slice = &s.key_cache[k_offset..k_offset + head_size];
+
+            // calculate the attention score as the dot product of q and k
+            let mut score = 0.0f32;
+            for i in 0..head_size {
+                score += q_slice[i] * k_slice[i];
+            }
+            score /= (head_size as f32).sqrt();
+
+            // save the score to the attention buffer
+            att_slice[t] = score;
+        }
+
+        // softmax the scores to get attention weights, from 0..pos inclusively
+        softmax(&mut att_slice[0..=pos], pos + 1);
+
+        // weighted sum of the values, store back into xb
+        let xb_start = h * head_size;
+        let xb_slice = &mut s.xb[xb_start..xb_start + head_size];
+
+        // zero out the slice
+        for val in xb_slice.iter_mut() {
+            *val = 0.0;
+        }
+
+        for t in 0..=pos {
+            // get the value vector for this head and at this timestep
+            let v_offset = loff + t * kv_dim + (h / kv_mul) * head_size;
+            let v_slice = &s.value_cache[v_offset..v_offset + head_size];
+
+            // get the attention weight for this timestep
+            let a = att_slice[t];
+
+            // accumulate the weighted value into xb
+            for i in 0..head_size {
+                xb_slice[i] += a * v_slice[i];
+            }
+        }
+    }
+```
+
+For each attention head in `p.n_heads`:
+
+1. split Q,K,V into smaller heads for parallel processing.
+2. compute the attention scores - dot product between query and all previous keys
+3. scale the scores by dividing them by `sqrt(head_size)`
+4. apply the software to convert the scores to probabilities
+5. combine values using attention weights to get outputs
+
+
