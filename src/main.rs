@@ -385,7 +385,7 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
         // final matmul to get the output of the attention
         let wo_offset = l * dim * dim;
         let wo_slice = &w.wo[wo_offset..wo_offset + dim * dim];
-        matmul(&mut s.xb2, &s.xb, wo_slice, dim, dim);
+        matmul(&mut s.xb2, &mut s.xb, &mut wo_slice, dim, dim);
 
         // residual connection back into x
         for i in 0..dim {
@@ -395,7 +395,7 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
         // ffn rmsnorm
         let rms_ffn_offset = l * dim;
         let rms_ffn_weights = &w.rms_ffn_weight[rms_ffn_offset..rms_ffn_offset + dim];
-        rmsnorm(&mut s.xb, &s.x, rms_ffn_weights, p.dim);
+        rmsnorm(&mut s.xb, &s.x, rms_ffn_weights, p.dim as usize);
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
@@ -404,8 +404,8 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
         let w1_slice = &w.w1[w1_offset..w1_offset + dim * hidden_dim];
         let w3_slice = &w.w3[w3_offset..w3_offset + dim * hidden_dim];
 
-        matmul(&mut s.hb, &s.xb, w1_slice, dim, hidden_dim);
-        matmul(&mut s.hb2, &s.xb, w3_slice, dim, hidden_dim);
+        matmul(&mut s.hb, &mut s.xb, &mut w1_slice, dim, hidden_dim);
+        matmul(&mut s.hb2, &mut s.xb, &mut w3_slice, dim, hidden_dim);
 
         // SwiGLU non-linearity
         for i in 0..hidden_dim {
@@ -419,8 +419,8 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
 
         // final matmul to get the output of the ffn
         let w2_offset = l * dim * hidden_dim;
-        let w2_slice = &w.w2[w2_offset..w2_offset + dim * hidden_dim];
-        matmul(&mut s.xb, &s.hb, w2_slice, hidden_dim, dim);
+        let w2_slice = &w.w2[w2_offset..&mut w2_offset + dim * hidden_dim];
+        matmul(&mut s.xb, &mut s.hb, &mut w2_slice, hidden_dim, dim);
 
         // residual connection
         for i in 0..dim {
@@ -429,13 +429,13 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
     }
 
     // final rmsnorm
-    rmsnorm(&mut s.x, &s.x.clone(), &w.rms_final_weight, p.dim);
+    rmsnorm(&mut s.x, &s.x.clone(), &w.rms_final_weight, p.dim as usize);
 
     // classifier into logits
     matmul(
         &mut s.logits,
-        &s.x,
-        &w.wcls,
+        &mut s.x,
+        &mut w.wcls,
         p.dim as usize,
         p.vocab_size as usize,
     );
