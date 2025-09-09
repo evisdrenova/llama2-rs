@@ -63,28 +63,28 @@ pub struct TransformerWeights<'a> {
     pub wcls: &'a [f32],
 }
 
-pub struct RunState {
+pub struct RunState<'a>  {
     // current wave of activations
-    pub x: Vec<f32>,      // activation at current time stamp (dim,)
-    pub xb: Vec<f32>,     // same, but inside a residual branch (dim,)
-    pub xb2: Vec<f32>,    // an additional buffer just for convenience (dim,)
-    pub hb: Vec<f32>,     // buffer for hidden dimension in the ffn (hidden_dim,)
-    pub hb2: Vec<f32>,    // buffer for hidden dimension in the ffn (hidden_dim,)
-    pub q: Vec<f32>,      // query (dim,)
-    pub k: Vec<f32>,      // key (dim,)
-    pub v: Vec<f32>,      // value (dim,)
-    pub att: Vec<f32>,    // buffer for scores/attention values (n_heads, seq_len)
-    pub logits: Vec<f32>, // output logits
+    pub x: &'a [f32],      // activation at current time stamp (dim,)
+    pub xb: &'a [f32],     // same, but inside a residual branch (dim,)
+    pub xb2: &'a [f32],    // an additional buffer just for convenience (dim,)
+    pub hb: &'a [f32],     // buffer for hidden dimension in the ffn (hidden_dim,)
+    pub hb2: &'a [f32],    // buffer for hidden dimension in the ffn (hidden_dim,)
+    pub q: &'a [f32],      // query (dim,)
+    pub k: &'a [f32],      // key (dim,)
+    pub v: &'a [f32],      // value (dim,)
+    pub att: &'a [f32]>,    // buffer for scores/attention values (n_heads, seq_len)
+    pub logits: &'a [f32], // output logits
     // kv cache
-    pub key_cache: Vec<f32>,   // (layer, seq_len, dim)
-    pub value_cache: Vec<f32>, // (layer, seq_len, dim)
+    pub key_cache: &'a [f32],   // (layer, seq_len, dim)
+    pub value_cache: &'a [f32], // (layer, seq_len, dim)
 }
 
 pub struct Transformer<'a> {
     pub config: Config, // the hyperparameters of the architecture (the blueprint)
     pub weights: TransformerWeights<'a>, // the weights of the model
     pub _mmap: Mmap,
-    pub state: RunState, // buffers for the "wave" of activations in the forward pass
+    pub state: RunState<'a>, // buffers for the "wave" of activations in the forward pass
                          // // some more state needed to properly clean up the memory mapping (sigh)
                          // pub fd: i32,        // file descriptor for memory mapping
                          // pub data: Vec<f32>, // memory mapped data pointer
