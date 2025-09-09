@@ -127,34 +127,39 @@ Inside our loop, we first normalize the layers using root mean square normalizat
 Next, we compute the Query, Key and Value vectors by multiplying the normalized input with the learned weight matrices.
 
 ```rust
-   let loff = l * p.seq_len as usize * kv_dim; // kv cache layer offset for convenience
-        let k_start = loff + pos * kv_dim;
-        let v_start = loff + pos * kv_dim;
+    // key and value point to the kv cache
+    let loff = l * p.seq_len as usize * kv_dim; // kv cache layer offset for convenience
+    let k_start = loff + pos * kv_dim;
+    let v_start = loff + pos * kv_dim;
 
-        // qkv matmuls for this position
-        let wq_offset = l * dim * dim;
-        let wk_offset = l * dim * kv_dim;
-        let wv_offset = l * dim * kv_dim;
+    // qkv matmuls for this position
+    let wq_offset = l * dim * dim;
+    let wk_offset = l * dim * kv_dim;
+    let wv_offset = l * dim * kv_dim;
 
-        let wq_slice = &w.wq[wq_offset..wq_offset + dim * dim];
-        let wk_slice = &w.wk[wk_offset..wk_offset + dim * kv_dim];
-        let wv_slice = &w.wv[wv_offset..wv_offset + dim * kv_dim];
+    let mut wq_slice = &w.wq[wq_offset..wq_offset + dim * dim];
+    let mut wk_slice = &w.wk[wk_offset..wk_offset + dim * kv_dim];
+    let mut wv_slice = &w.wv[wv_offset..wv_offset + dim * kv_dim];
 
-        matmul(&mut s.q, &s.xb, wq_slice, dim, dim);
-        matmul(
-            &mut s.key_cache[k_start..k_start + kv_dim],
-            &s.xb,
-            wk_slice,
-            dim,
-            kv_dim,
-        );
-        matmul(
-            &mut s.value_cache[v_start..v_start + kv_dim],
-            &s.xb,
-            wv_slice,
-            dim,
-            kv_dim,
-        );
+    matmul(&mut s.q, &mut s.xb, &mut wq_slice, dim, dim);
+    matmul(
+        &mut s.key_cache[k_start..k_start + kv_dim],
+        &mut s.xb,
+        &mut wq_slice,
+        dim,
+        kv_dim,
+    );
+    matmul(
+        &mut s.value_cache[v_start..v_start + kv_dim],
+        &mut s.xb,
+        &mut wq_slice,
+        dim,
+        kv_dim,
+    );
 ```
 
 This is a critical part of our attention calculation and is what helps our LLM attend to each token in the sequence. It's a little more verbose than the C implementation but that's mainly for readability.
+
+Next, we move onto our RoPE (rotary position encoding).
+
+Here we apply RoPE to inject position information into the Q and K vectors. This allows the model to understand relative positions of tokens.

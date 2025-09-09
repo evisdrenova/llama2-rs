@@ -63,7 +63,7 @@ pub struct TransformerWeights<'a> {
     pub wcls: &'a [f32],
 }
 
-pub struct RunState<'a>  {
+pub struct RunState<'a> {
     // current wave of activations
     pub x: &'a [f32],      // activation at current time stamp (dim,)
     pub xb: &'a [f32],     // same, but inside a residual branch (dim,)
@@ -73,7 +73,7 @@ pub struct RunState<'a>  {
     pub q: &'a [f32],      // query (dim,)
     pub k: &'a [f32],      // key (dim,)
     pub v: &'a [f32],      // value (dim,)
-    pub att: &'a [f32]>,    // buffer for scores/attention values (n_heads, seq_len)
+    pub att: &'a [f32],    // buffer for scores/attention values (n_heads, seq_len)
     pub logits: &'a [f32], // output logits
     // kv cache
     pub key_cache: &'a [f32],   // (layer, seq_len, dim)
@@ -85,10 +85,10 @@ pub struct Transformer<'a> {
     pub weights: TransformerWeights<'a>, // the weights of the model
     pub _mmap: Mmap,
     pub state: RunState<'a>, // buffers for the "wave" of activations in the forward pass
-                         // // some more state needed to properly clean up the memory mapping (sigh)
-                         // pub fd: i32,        // file descriptor for memory mapping
-                         // pub data: Vec<f32>, // memory mapped data pointer
-                         // pub file_size: i32, // size of the checkpoint file in bytes
+                             // // some more state needed to properly clean up the memory mapping (sigh)
+                             // pub fd: i32,        // file descriptor for memory mapping
+                             // pub data: Vec<f32>, // memory mapped data pointer
+                             // pub file_size: i32, // size of the checkpoint file in bytes
 }
 
 pub fn memory_map_weights<'a>(
@@ -283,22 +283,22 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
         let wk_offset = l * dim * kv_dim;
         let wv_offset = l * dim * kv_dim;
 
-        let wq_slice = &w.wq[wq_offset..wq_offset + dim * dim];
-        let wk_slice = &w.wk[wk_offset..wk_offset + dim * kv_dim];
-        let wv_slice = &w.wv[wv_offset..wv_offset + dim * kv_dim];
+        let mut wq_slice = &w.wq[wq_offset..wq_offset + dim * dim];
+        let mut wk_slice = &w.wk[wk_offset..wk_offset + dim * kv_dim];
+        let mut wv_slice = &w.wv[wv_offset..wv_offset + dim * kv_dim];
 
-        matmul(&mut s.q, &s.xb, wq_slice, dim, dim);
+        matmul(&mut s.q, &mut s.xb, &mut wq_slice, dim, dim);
         matmul(
             &mut s.key_cache[k_start..k_start + kv_dim],
-            &s.xb,
-            wk_slice,
+            &mut s.xb,
+            &mut wq_slice,
             dim,
             kv_dim,
         );
         matmul(
             &mut s.value_cache[v_start..v_start + kv_dim],
-            &s.xb,
-            wv_slice,
+            &mut s.xb,
+            &mut wq_slice,
             dim,
             kv_dim,
         );
