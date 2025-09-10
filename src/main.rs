@@ -65,19 +65,19 @@ pub struct TransformerWeights<'a> {
 
 pub struct RunState<'a> {
     // current wave of activations
-    pub x: &'a [f32],      // activation at current time stamp (dim,)
-    pub xb: &'a [f32],     // same, but inside a residual branch (dim,)
-    pub xb2: &'a [f32],    // an additional buffer just for convenience (dim,)
-    pub hb: &'a [f32],     // buffer for hidden dimension in the ffn (hidden_dim,)
-    pub hb2: &'a [f32],    // buffer for hidden dimension in the ffn (hidden_dim,)
-    pub q: &'a [f32],      // query (dim,)
-    pub k: &'a [f32],      // key (dim,)
-    pub v: &'a [f32],      // value (dim,)
-    pub att: &'a [f32],    // buffer for scores/attention values (n_heads, seq_len)
-    pub logits: &'a [f32], // output logits
+    pub x: &'a mut [f32],      // activation at current time stamp (dim,)
+    pub xb: &'a mut [f32],     // same, but inside a residual branch (dim,)
+    pub xb2: &'a mut [f32],    // an additional buffer just for convenience (dim,)
+    pub hb: &'a mut [f32],     // buffer for hidden dimension in the ffn (hidden_dim,)
+    pub hb2: &'a mut [f32],    // buffer for hidden dimension in the ffn (hidden_dim,)
+    pub q: &'a mut [f32],      // query (dim,)
+    pub k: &'a mut [f32],      // key (dim,)
+    pub v: &'a [f32],          // value (dim,)
+    pub att: &'a mut [f32],    // buffer for scores/attention values (n_heads, seq_len)
+    pub logits: &'a mut [f32], // output logits
     // kv cache
-    pub key_cache: &'a [f32],   // (layer, seq_len, dim)
-    pub value_cache: &'a [f32], // (layer, seq_len, dim)
+    pub key_cache: &'a mut [f32],   // (layer, seq_len, dim)
+    pub value_cache: &'a mut [f32], // (layer, seq_len, dim)
 }
 
 pub struct Transformer<'a> {
@@ -385,7 +385,7 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
         // final matmul to get the output of the attention
         let wo_offset = l * dim * dim;
         let wo_slice = &w.wo[wo_offset..wo_offset + dim * dim];
-        matmul(&mut s.xb2, &mut s.xb, &mut wo_slice, dim, dim);
+        matmul(&mut s.xb2, &mut s.xb, wo_slice, dim, dim);
 
         // residual connection back into x
         for i in 0..dim {
@@ -429,14 +429,14 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
         }
     }
 
-    // final rmsnorm
-    rmsnorm(&mut s.x, &s.x.clone(), &w.rms_final_weight, p.dim as usize);
+    let x_copy = s.x.to_vec();
+    rmsnorm(&mut s.x, &x_copy, &w.rms_final_weight, p.dim as usize);
 
     // classifier into logits
     matmul(
         &mut s.logits,
-        &mut s.x,
-        &mut w.wcls,
+        s.x,
+        w.wcls,
         p.dim as usize,
         p.vocab_size as usize,
     );
