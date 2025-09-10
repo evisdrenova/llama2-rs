@@ -238,7 +238,7 @@ fn softmax(x: &mut [f32], size: usize) {
     }
 }
 
-fn matmul(xout: &mut [f32], x: &mut [f32], w: &mut [f32], n: usize, d: usize) {
+fn matmul(xout: &mut [f32], x: &[f32], w: &[f32], n: usize, d: usize) {
     xout.par_iter_mut().enumerate().for_each(|(i, out_val)| {
         let mut val = 0.0f32;
         for j in 0..n {
@@ -404,8 +404,8 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
         let w1_slice = &w.w1[w1_offset..w1_offset + dim * hidden_dim];
         let w3_slice = &w.w3[w3_offset..w3_offset + dim * hidden_dim];
 
-        matmul(&mut s.hb, &mut s.xb, &mut w1_slice, dim, hidden_dim);
-        matmul(&mut s.hb2, &mut s.xb, &mut w3_slice, dim, hidden_dim);
+        matmul(&mut s.hb, &mut s.xb, &w1_slice, dim, hidden_dim);
+        matmul(&mut s.hb2, &mut s.xb, &w3_slice, dim, hidden_dim);
 
         // SwiGLU non-linearity
         for i in 0..hidden_dim {
@@ -419,8 +419,9 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
 
         // final matmul to get the output of the ffn
         let w2_offset = l * dim * hidden_dim;
-        let w2_slice = &w.w2[w2_offset..&mut w2_offset + dim * hidden_dim];
-        matmul(&mut s.xb, &mut s.hb, &mut w2_slice, hidden_dim, dim);
+        let mut w2_slice = &w.w2[w2_offset..w2_offset + dim * hidden_dim];
+        matmul(&mut s.xb, &mut s.hb, w2_slice, hidden_dim, dim);
+        matmul(&mut s.xb, &mut s.hb, w2_slice, hidden_dim, dim);
 
         // residual connection
         for i in 0..dim {

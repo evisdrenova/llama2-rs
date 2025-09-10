@@ -256,5 +256,3 @@ For each attention head in `p.n_heads`:
 3. scale the scores by dividing them by `sqrt(head_size)`
 4. apply the software to convert the scores to probabilities
 5. combine values using attention weights to get outputs
-
-
