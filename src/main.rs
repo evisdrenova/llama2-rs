@@ -1,6 +1,7 @@
 use memmap2::Mmap;
 use rayon::prelude::*;
 use std::{
+    cmp::Ordering,
     fs::File,
     io::{self, Result},
     path::Path,
@@ -444,8 +445,23 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
     &s.logits
 }
 
+pub struct TokenIndex<'a> {
+    str: &'a str,
+    id: usize,
+}
 
-pub struct TokenIndex
+pub struct Tokenizer<'a> {
+    vocab: &'a [&'a str],
+    vocab_scores: &'a [f32],
+    sorted_vocab: &'a [TokenIndex<'a>],
+    vocab_size: i32,
+    max_token_length: u32,
+    byte_pieces: [u8; 512],
+}
+
+fn compare_tokens(a: &TokenIndex, b: &TokenIndex) -> Ordering {
+    a.str.cmp(&b.str)
+}
 
 fn main() {
     println!("Hello, world!");

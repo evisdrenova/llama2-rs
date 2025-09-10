@@ -309,3 +309,8 @@ LAST STEP! Just a simple root mean square normalization and then we project the 
     &s.logits
     ```
 ````
+
+## Tokenizer
+
+Next, we'll move onto the tokenizer. The tokenizer is responsible for taking our input prompt, and chopping it up into tokens derived from our vocab, creating embeddings from those tokens and feeding those embeddings to our Transformer that we created above. 
+
