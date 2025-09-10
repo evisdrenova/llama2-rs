@@ -444,6 +444,9 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
     &s.logits
 }
 
+
+pub struct TokenIndex
+
 fn main() {
     println!("Hello, world!");
 }

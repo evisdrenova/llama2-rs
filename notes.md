@@ -256,3 +256,56 @@ For each attention head in `p.n_heads`:
 3. scale the scores by dividing them by `sqrt(head_size)`
 4. apply the software to convert the scores to probabilities
 5. combine values using attention weights to get outputs
+
+By the end of this process, we will have attention scores that we can project back to the model dimensions and add a residual connection.
+
+Almost done, hang in there!
+
+Next step is the Feed Forward Network (FFN) with SwiGLU. The FFN normalizes the attention scores and then projects it to two linear projections of size `hidden_dim`.
+
+```rust
+  rmsnorm(&mut s.xb, &s.x, rms_ffn_weights, p.dim);
+
+    // Two parallel linear projections
+    matmul(&mut s.hb, &s.xb, w1_slice, dim, hidden_dim);   // Gate projection
+    matmul(&mut s.hb2, &s.xb, w3_slice, dim, hidden_dim);  // Up projection
+```
+
+Then we apply switch activation to one project and then multiply it by the gating mechanism.
+
+```rust
+   // SwiGLU activation
+    for i in 0..hidden_dim {
+        let mut val = s.hb[i];
+        val *= 1.0f32 / (1.0f32 + (-val).exp());  // SiLU activation
+        val *= s.hb2[i];                           // Gated by second projection
+        s.hb[i] = val;
+    }
+
+    // Down projection
+    matmul(&mut s.xb, &s.hb, w2_slice, hidden_dim, dim);
+```
+
+Lastly, we down project the scores back to the model dimensions from the hidden dimensions and then add a skip connection.
+
+```rust
+   // Down projection
+    matmul(&mut s.xb, &s.hb, w2_slice, hidden_dim, dim);
+
+    // Residual connection
+    for i in 0..dim {
+        s.x[i] += s.xb[i];
+    }
+```
+
+LAST STEP! Just a simple root mean square normalization and then we project the model to the vocab size to get the logits for the next token prediction and return the logits.
+
+````rust
+  rmsnorm(&mut s.x, &s.x.clone(), &w.rms_final_weight, p.dim);
+
+    // Classification head
+    matmul(&mut s.logits, &s.x, &w.wcls, p.dim as usize, p.vocab_size as usize);
+
+    &s.logits
+    ```
+````
