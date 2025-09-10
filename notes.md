@@ -312,5 +312,6 @@ LAST STEP! Just a simple root mean square normalization and then we project the 
 
 ## Tokenizer
 
-Next, we'll move onto the tokenizer. The tokenizer is responsible for taking our input prompt, and chopping it up into tokens derived from our vocab, creating embeddings from those tokens and feeding those embeddings to our Transformer that we created above. 
+Next, we'll move onto the tokenizer. The tokenizer is responsible for taking our input prompt, and chopping it up into tokens derived from our vocab, creating embeddings from those tokens and feeding those embeddings to our Transformer that we created above.
 
+First, we'll define our structs here that will hold our token indexes as as well our tokenizer. Then we'll get to work on the helper functions.
