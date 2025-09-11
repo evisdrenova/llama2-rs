@@ -451,9 +451,9 @@ pub struct TokenIndex<'a> {
 }
 
 pub struct Tokenizer<'a> {
-    vocab: &'a [&'a str],
-    vocab_scores: &'a [f32],
-    sorted_vocab: &'a [TokenIndex<'a>],
+    vocab: Vec<String>,
+    vocab_scores: Vec<f32>,
+    sorted_vocab: Option<Vec<TokenIndex<'a>>>,
     vocab_size: i32,
     max_token_length: u32,
     byte_pieces: [u8; 512],
@@ -461,6 +461,11 @@ pub struct Tokenizer<'a> {
 
 fn compare_tokens(a: &TokenIndex, b: &TokenIndex) -> Ordering {
     a.str.cmp(&b.str)
+}
+
+fn build_tokenizer<'a>(t: &mut Tokenizer, tokenizer_path: &'a str, vocab_size: i32) {
+    t.vocab_size = vocab_size;
+    t.vocab = Vec::with_capacity(vocab_size as usize);
 }
 
 fn main() {

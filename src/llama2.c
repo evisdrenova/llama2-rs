@@ -447,6 +447,7 @@ void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
     t->vocab = (char **)malloc(vocab_size * sizeof(char *));
     t->vocab_scores = (float *)malloc(vocab_size * sizeof(float));
     t->sorted_vocab = NULL; // initialized lazily
+    
     for (int i = 0; i < 256; i++)
     {
         t->byte_pieces[i * 2] = (unsigned char)i;
