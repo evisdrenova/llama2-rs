@@ -382,3 +382,39 @@ Value: [0][0][1][0][2][0][3][0][4][0]...
 ```
 
 Each byte value (0-255) gets stored as a 2-byte null-terminated string. This is the foundation of tokenizer so that we can tokenize any prompt that the user gives.
+
+Next, we convert the decode function, which converts token IDs back into their string representations and handles a couple of cases.
+
+```rust
+
+fn decode(t: &mut Tokenizer, prev_token: i32, token: i32) -> String {
+    let mut piece = t.vocab[token as usize].clone(); // Get a String, not &str
+
+    // Following BOS (1) token, sentencepiece decoder strips any leading whitespace
+    if prev_token == 1 && piece.starts_with(' ') {
+        piece = piece[1..].to_string(); // Remove the & here
+    }
+
+    // Check for hex byte pattern
+    if let Some(byte_val) = parse_hex_byte(&piece) {
+        // Add & here for the function call
+        // Return the single byte as a string
+        return String::from_utf8_lossy(&[byte_val]).to_string();
+    }
+
+    piece // Already a String, no need for .to_string()
+}
+
+fn parse_hex_byte(s: &str) -> Option<u8> {
+    // Check if string matches pattern "<0xHH>"
+    if s.len() == 6 && s.starts_with("<0x") && s.ends_with('>') {
+        // Extract the hex part (characters 3-4)
+        let hex_part = &s[3..5];
+        u8::from_str_radix(hex_part, 16).ok()
+    } else {
+        None
+    }
+}
+```
+
+It does a basisc token lookup in the vocab and it handles whitespce after the BOS (beginning of sequence) token.
