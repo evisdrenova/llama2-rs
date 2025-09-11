@@ -3,8 +3,9 @@ use rayon::prelude::*;
 use std::{
     cmp::Ordering,
     fs::File,
-    io::{self, Result},
+    io::{self, BufReader, Read, Result},
     path::Path,
+    string,
 };
 
 pub struct Config {
@@ -464,8 +465,56 @@ fn compare_tokens(a: &TokenIndex, b: &TokenIndex) -> Ordering {
 }
 
 fn build_tokenizer<'a>(t: &mut Tokenizer, tokenizer_path: &'a str, vocab_size: i32) {
-    t.vocab_size = vocab_size;
-    t.vocab = Vec::with_capacity(vocab_size as usize);
+    let mut tokenizer = Tokenizer {
+        vocab_size,
+        vocab: Vec::with_capacity(vocab_size as usize),
+        vocab_scores: Vec::with_capacity(vocab_size as usize),
+        sorted_vocab: None,
+        max_token_length: 0,
+        byte_pieces: [0u8; 512],
+    };
+
+    for i in 0..256 {
+        tokenizer.byte_pieces[i * 2] = i as u8;
+        tokenizer.byte_pieces[i * 2 + 1] = 0u8;
+    }
+
+    let file = File::open(tokenizer_path).unwrap();
+    let mut reader = BufReader::new(file);
+    let mut len: i32;
+
+    for i in 0..vocab_size {
+        // Read vocab score
+        let mut score_bytes = [0u8; size_of::<f32>()];
+        reader
+            .read_exact(&mut score_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "failed read"))
+            .unwrap();
+        let score = f32::from_le_bytes(score_bytes);
+        tokenizer.vocab_scores.push(score);
+
+        // Read string length
+        let mut len_bytes = [0u8; size_of::<i32>()];
+        reader
+            .read_exact(&mut len_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "failed read"))
+            .unwrap();
+        let len = i32::from_le_bytes(len_bytes) as usize;
+
+        // Read string data
+        let mut string_bytes = vec![0u8; len];
+        reader
+            .read_exact(&mut string_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "failed read"))
+            .unwrap();
+
+        // Convert bytes to UTF-8 string
+        let vocab_string = String::from_utf8(string_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 in vocab"))
+            .unwrap();
+
+        tokenizer.vocab.push(vocab_string);
+    }
 }
 
 fn main() {
