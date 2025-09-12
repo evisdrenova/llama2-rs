@@ -1,6 +1,6 @@
 # llama2-rs
 
-This is a rust port of Karpathy's llama2.c tiny and simple inference engine written in pure c. I thought it would be fun to port this to rust to improve my own learning. I also wanted to take some notes of my thought process as im doing this.
+This is a rust port of [Karpathy's llama2.c tiny and simple inference engine written in pure c](https://github.com/karpathy/llama2.c). I thought it would be fun to port this to rust to improve my own learning. I also wanted to take some notes of my thought process as I'm doing this.
 
 I'm following this file top to bottom so my notes will flow in that direction.
 
@@ -819,13 +819,211 @@ Here we define a `new` method to instantiate a new sampler and then we define th
 We finally made it to the last section! We're now ready to implement our generate function which runs the generation function and the chat function which accepts our prompt.
 
 ```rust
+fn generate(
+    transformer: &mut Transformer,
+    tokenizer: &mut Tokenizer,
+    sampler: &mut Sampler,
+    prompt: Option<&str>,
+    steps: usize,
+) -> io::Result<()> {
+    // Handle null prompt
+    let prompt = prompt.unwrap_or("");
 
+    // encode the (string) prompt into tokens sequence
+    let mut prompt_tokens = Vec::with_capacity(prompt.len() + 3); // +3 for '\0', ?BOS, ?EOS
+    let num_prompt_tokens = encode(tokenizer, prompt, true, false, &mut prompt_tokens);
+
+    if num_prompt_tokens < 1 {
+        eprintln!("something is wrong, expected at least 1 prompt token");
+        std::process::exit(1);
+    }
+
+    // start the main loop
+    let mut start = 0u128; // used to time our code, only initialized after first iteration
+    let mut next: usize; // will store the next token in the sequence
+    let mut token = prompt_tokens[0] as usize; // kick off with the first token in the prompt
+    let mut pos = 0; // position in the sequence
+
+    while pos < steps {
+        // forward the transformer to get logits for the next token
+        let logits = forward(transformer, token, pos);
+
+        // advance the state machine
+        if pos < num_prompt_tokens - 1 {
+            // if we are still processing the input prompt, force the next prompt token
+            next = prompt_tokens[pos + 1] as usize;
+        } else {
+            // otherwise sample the next token from the logits
+            // Convert logits to mutable slice for sampling
+            let mut logits_mut = logits.to_vec();
+            next = sampler.sample(&mut logits_mut) as usize;
+        }
+        pos += 1;
+
+        // data-dependent terminating condition: the BOS (=1) token delimits sequences
+        if next == 1 {
+            break;
+        }
+
+        // print the token as string, decode it with the Tokenizer object
+        let piece = decode(tokenizer, token as i32, next as i32);
+        safe_printf(Some(&piece)); // same as printf("%s", piece), but skips "unsafe" bytes
+        io::stdout().flush().unwrap();
+        token = next;
+
+        // init the timer here because the first iteration can be slower
+        if start == 0 {
+            start = time_in_ms();
+        }
+    }
+    println!(); // Print newline
+
+    // report achieved tok/s (pos-1 because the timer starts after first iteration)
+    if pos > 1 {
+        let end = time_in_ms();
+        let elapsed_ms = end - start;
+        let tokens_per_second = (pos - 1) as f64 / (elapsed_ms as f64 / 1000.0);
+        eprintln!("achieved tok/s: {:.2}", tokens_per_second);
+    }
+
+    Ok(())
+}
+
+fn read_stdin(guide: &str, bufsize: usize) -> io::Result<String> {
+    // read a line from stdin, up to but not including \n
+    print!("{}", guide);
+    io::stdout().flush()?;
+
+    let stdin = io::stdin();
+    let mut buffer = String::with_capacity(bufsize);
+
+    match stdin.lock().read_line(&mut buffer) {
+        Ok(_) => {
+            // Remove trailing newline if present
+            if buffer.ends_with('\n') {
+                buffer.pop();
+                if buffer.ends_with('\r') {
+                    buffer.pop(); // Handle Windows line endings
+                }
+            }
+            Ok(buffer)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn time_in_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+        .as_millis()
+}
+
+fn chat(
+    transformer: &mut Transformer,
+    tokenizer: &mut Tokenizer,
+    sampler: &mut Sampler,
+    cli_user_prompt: Option<&str>,
+    cli_system_prompt: Option<&str>,
+    steps: usize,
+) -> io::Result<()> {
+    let mut prompt_tokens = Vec::with_capacity(1152);
+    let mut user_idx = 0;
+    let mut user_turn = true;
+    let mut pos = 0;
+    let mut next = 0;
+
+    while pos < steps {
+        if user_turn {
+            let (system_prompt, user_prompt) =
+                get_prompts(pos == 0, cli_system_prompt, cli_user_prompt)?;
+
+            let rendered_prompt = render_chat_prompt(pos == 0, &system_prompt, &user_prompt);
+
+            let num_prompt_tokens =
+                encode(tokenizer, &rendered_prompt, true, false, &mut prompt_tokens);
+            if num_prompt_tokens == 0 {
+                eprintln!("Warning: No tokens generated from prompt");
+                continue;
+            }
+
+            user_idx = 0;
+            user_turn = false;
+            print!("Assistant: ");
+            io::stdout().flush()?;
+        }
+
+        let token = if user_idx < prompt_tokens.len() {
+            let token = prompt_tokens[user_idx] as usize;
+            user_idx += 1;
+            token
+        } else {
+            next
+        };
+
+        // EOS token ends Assistant turn
+        if token == 2 {
+            user_turn = true;
+            continue;
+        }
+
+        let logits = forward(transformer, token, pos);
+        let mut logits_mut = logits.to_vec();
+        next = sampler.sample(&mut logits_mut) as usize;
+        pos += 1;
+
+        // Print Assistant response
+        if user_idx >= prompt_tokens.len() && next != 2 {
+            let piece = decode(tokenizer, token as i32, next as i32);
+            safe_printf(Some(&piece));
+            io::stdout().flush()?;
+        }
+
+        if next == 2 {
+            println!();
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+fn get_prompts(
+    is_first_turn: bool,
+    cli_system_prompt: Option<&str>,
+    cli_user_prompt: Option<&str>,
+) -> io::Result<(String, String)> {
+    let system_prompt = if is_first_turn {
+        if let Some(sys_prompt) = cli_system_prompt {
+            sys_prompt.to_string()
+        } else {
+            read_stdin("Enter system prompt (optional): ", 512)?
+        }
+    } else {
+        String::new()
+    };
+
+    let user_prompt = if is_first_turn && cli_user_prompt.is_some() {
+        cli_user_prompt.unwrap().to_string()
+    } else {
+        read_stdin("User: ", 512)?
+    };
+
+    Ok((system_prompt, user_prompt))
+}
+
+fn render_chat_prompt(is_first_turn: bool, system_prompt: &str, user_prompt: &str) -> String {
+    if is_first_turn && !system_prompt.is_empty() {
+        format!(
+            "[INST] <<SYS>>\n{}\n<</SYS>>\n\n{} [/INST]",
+            system_prompt, user_prompt
+        )
+    } else {
+        format!("[INST] {} [/INST]", user_prompt)
+    }
+}
 ```
 
-```rust
+There's a lot of code there but it's pretty straightforward. This wraps up our port of llama2.c to rust!
 
-```
-
-```rust
-
-```
+I find that the best way to learn something is to re-implement it in a different language. Especially going from C where everything is so granular, you're really forced to get into the weeds.

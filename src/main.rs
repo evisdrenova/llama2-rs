@@ -1,11 +1,12 @@
 use memmap2::Mmap;
 use rayon::prelude::*;
+use std::io::BufRead;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     cmp::Ordering,
     fs::File,
     io::{self, BufReader, Read, Result, Write},
     path::Path,
-    string,
 };
 
 pub struct Config {
@@ -928,7 +929,7 @@ fn generate(
 
     // encode the (string) prompt into tokens sequence
     let mut prompt_tokens = Vec::with_capacity(prompt.len() + 3); // +3 for '\0', ?BOS, ?EOS
-    let num_prompt_tokens = tokenizer.encode(prompt, true, false, &mut prompt_tokens);
+    let num_prompt_tokens = encode(tokenizer, prompt, true, false, &mut prompt_tokens);
 
     if num_prompt_tokens < 1 {
         eprintln!("something is wrong, expected at least 1 prompt token");
@@ -943,7 +944,7 @@ fn generate(
 
     while pos < steps {
         // forward the transformer to get logits for the next token
-        let logits = forward(transformer, token, pos)?;
+        let logits = forward(transformer, token, pos);
 
         // advance the state machine
         if pos < num_prompt_tokens - 1 {
@@ -953,7 +954,7 @@ fn generate(
             // otherwise sample the next token from the logits
             // Convert logits to mutable slice for sampling
             let mut logits_mut = logits.to_vec();
-            next = sampler.sample(&mut logits_mut);
+            next = sampler.sample(&mut logits_mut) as usize;
         }
         pos += 1;
 
@@ -963,7 +964,7 @@ fn generate(
         }
 
         // print the token as string, decode it with the Tokenizer object
-        let piece = tokenizer.decode(token as i32, next as i32);
+        let piece = decode(tokenizer, token as i32, next as i32);
         safe_printf(Some(&piece)); // same as printf("%s", piece), but skips "unsafe" bytes
         io::stdout().flush().unwrap();
         token = next;
@@ -1009,7 +1010,14 @@ fn read_stdin(guide: &str, bufsize: usize) -> io::Result<String> {
     }
 }
 
-fn chat_improved(
+fn time_in_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+        .as_millis()
+}
+
+fn chat(
     transformer: &mut Transformer,
     tokenizer: &mut Tokenizer,
     sampler: &mut Sampler,
@@ -1031,7 +1039,7 @@ fn chat_improved(
             let rendered_prompt = render_chat_prompt(pos == 0, &system_prompt, &user_prompt);
 
             let num_prompt_tokens =
-                tokenizer.encode(&rendered_prompt, true, false, &mut prompt_tokens);
+                encode(tokenizer, &rendered_prompt, true, false, &mut prompt_tokens);
             if num_prompt_tokens == 0 {
                 eprintln!("Warning: No tokens generated from prompt");
                 continue;
@@ -1057,14 +1065,14 @@ fn chat_improved(
             continue;
         }
 
-        let logits = forward(transformer, token, pos)?;
+        let logits = forward(transformer, token, pos);
         let mut logits_mut = logits.to_vec();
-        next = sampler.sample(&mut logits_mut);
+        next = sampler.sample(&mut logits_mut) as usize;
         pos += 1;
 
         // Print Assistant response
         if user_idx >= prompt_tokens.len() && next != 2 {
-            let piece = tokenizer.decode(token as i32, next as i32);
+            let piece = decode(tokenizer, token as i32, next as i32);
             safe_printf(Some(&piece));
             io::stdout().flush()?;
         }
