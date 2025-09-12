@@ -893,7 +893,7 @@ impl Sampler {
                     self.topp,
                     &mut self.probindex,
                     coin,
-                );
+                ) as i32;
             }
         }
 
