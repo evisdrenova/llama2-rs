@@ -1121,6 +1121,186 @@ fn render_chat_prompt(is_first_turn: bool, system_prompt: &str, user_prompt: &st
     }
 }
 
-fn main() {
-    println!("Hello, world!");
+fn load_tokenizer(path: &str, vocab_size: i32) -> io::Result<Tokenizer> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+
+    let mut t = Tokenizer {
+        vocab_size,
+        vocab: Vec::with_capacity(vocab_size as usize),
+        vocab_scores: Vec::with_capacity(vocab_size as usize),
+        sorted_vocab: None,
+        max_token_length: 0,
+        byte_pieces: [0u8; 512],
+    };
+
+    // byte pieces for fallback
+    for i in 0..256 {
+        t.byte_pieces[i * 2] = i as u8;
+        t.byte_pieces[i * 2 + 1] = 0u8;
+    }
+
+    for _ in 0..vocab_size {
+        // score
+        let mut sb = [0u8; std::mem::size_of::<f32>()];
+        reader.read_exact(&mut sb)?;
+        t.vocab_scores.push(f32::from_le_bytes(sb));
+
+        // len
+        let mut lb = [0u8; std::mem::size_of::<i32>()];
+        reader.read_exact(&mut lb)?;
+        let len = i32::from_le_bytes(lb) as usize;
+
+        // string
+        let mut bytes = vec![0u8; len];
+        reader.read_exact(&mut bytes)?;
+        let s = String::from_utf8(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 in vocab"))?;
+        t.vocab.push(s);
+    }
+
+    // derive max token length
+    t.max_token_length = t.vocab.iter().map(|s| s.len() as u32).max().unwrap_or(0);
+
+    Ok(t)
+}
+
+fn load_transformer(checkpoint_path: &str) -> io::Result<Transformer<'static>> {
+    let path = Path::new(checkpoint_path);
+
+    // read header + mmap file
+    let (cfg, mmap, shared_weights) = read_checkpoint(path)?;
+
+    // ---- weights slice out of the mmap payload ----
+    let weights_bytes = &mmap[size_of::<Config>()..];
+
+    if weights_bytes.len() % 4 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "weights length not multiple of 4",
+        ));
+    }
+
+    // SAFETY: checkpoint format is little-endian f32-packed after header.
+    // If you want to be extra safe, also check alignment via align_to.
+    let weights_f32: &'static [f32] = unsafe {
+        std::slice::from_raw_parts(
+            weights_bytes.as_ptr() as *const f32,
+            weights_bytes.len() / 4,
+        )
+    };
+
+    // ---- prepare an empty weights container and map in-place ----
+    let mut weights = TransformerWeights {
+        token_embedding_table: &[],
+        rms_att_weight: &[],
+        rms_ffn_weight: &[],
+        wq: &[],
+        wk: &[],
+        wv: &[],
+        wo: &[],
+        w1: &[],
+        w2: &[],
+        w3: &[],
+        rms_final_weight: &[],
+        wcls: &[],
+    };
+
+    memory_map_weights(&mut weights, &cfg, weights_f32, shared_weights as i32);
+
+    // ---- allocate runtime state buffers (owned -> leak to get 'static refs) ----
+    let dim = cfg.dim as usize;
+    let hidden_dim = cfg.hidden_dim as usize;
+    let seq_len = cfg.seq_len as usize;
+    let n_layers = cfg.n_layers as usize;
+    let n_heads = cfg.n_heads as usize;
+    let n_kv_heads = cfg.n_kv_heads as usize;
+    let kv_dim = ((cfg.dim * cfg.n_kv_heads) / cfg.n_heads) as usize;
+
+    // helper to leak a Vec and get &'static mut [f32]
+    fn leak_mut_slice(mut v: Vec<f32>) -> &'static mut [f32] {
+        let b = v.into_boxed_slice();
+        Box::leak(b)
+    }
+
+    let x = leak_mut_slice(vec![0.0; dim]);
+    let xb = leak_mut_slice(vec![0.0; dim]);
+    let xb2 = leak_mut_slice(vec![0.0; dim]);
+    let hb = leak_mut_slice(vec![0.0; hidden_dim]);
+    let hb2 = leak_mut_slice(vec![0.0; hidden_dim]);
+    let q = leak_mut_slice(vec![0.0; dim]);
+    let k = leak_mut_slice(vec![0.0; dim]);
+    // NOTE: your RunState defines `v: &'a [f32]` (immutable),
+    // but you write to value cache. Keep it `&'a mut [f32]` if you plan to mutate.
+    // For now, provide a dummy immutable slice; your code uses `value_cache` for writes.
+    let v_slice: &'static [f32] = {
+        let tmp = vec![0.0f32; dim];
+        let bx = tmp.into_boxed_slice();
+        Box::leak(bx)
+    };
+    let att = leak_mut_slice(vec![0.0; n_heads * seq_len]);
+    let logits = leak_mut_slice(vec![0.0; cfg.vocab_size as usize]);
+
+    // KV cache: (layer, seq_len, kv_dim)
+    let key_cache = leak_mut_slice(vec![0.0; n_layers * seq_len * kv_dim]);
+    let value_cache = leak_mut_slice(vec![0.0; n_layers * seq_len * kv_dim]);
+
+    let state = RunState {
+        x,
+        xb,
+        xb2,
+        hb,
+        hb2,
+        q,
+        k,
+        v: v_slice,
+        att,
+        logits,
+        key_cache,
+        value_cache,
+    };
+
+    // build final Transformer
+    Ok(Transformer {
+        config: cfg,
+        weights,
+        _mmap: mmap, // keep mapping alive as long as Transformer lives
+        state,
+    })
+}
+
+fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let model_path = args.get(1).map(String::as_str).unwrap_or("model.bin");
+    let tokenizer_path = args.get(2).map(String::as_str).unwrap_or("tokenizer.bin");
+    let steps: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
+
+    // temperature, topp, seed (tweak to taste)
+    let temperature: f32 = 0.8;
+    let topp: f32 = 0.9;
+    let seed: u64 = 12345;
+
+    // 1) load transformer (mmap weights + allocate state buffers)
+    let mut transformer = load_transformer(model_path)?;
+
+    // 2) load tokenizer
+    let mut tokenizer = load_tokenizer(tokenizer_path, transformer.config.vocab_size)?;
+
+    // 3) sampler
+    let mut sampler = Sampler::new(
+        transformer.config.vocab_size as usize,
+        temperature,
+        topp,
+        seed,
+    );
+
+    // 4) chat loop
+    chat(
+        &mut transformer,
+        &mut tokenizer,
+        &mut sampler,
+        None, // CLI user prompt (first turn); None -> prompt on stdin
+        None, // CLI system prompt (first turn); None -> optional stdin
+        steps,
+    )
 }
