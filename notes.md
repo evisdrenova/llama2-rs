@@ -755,14 +755,68 @@ if eos { tokens.push(2); } // End of sequence
 
 Nice - we're geting pretty close to being done. Next, we have the sampler. The sampler takes in logits and returns a sampled token from a distribution. There are a few ways to do this: greedy argmax, sampling, top-p sampling and others but we'll focus on these for now.
 
-I'm not going to go in depth on these next few functions,. they're pretty straight forward and just a straight port from C. 
+I'm not going to go in depth on these next few functions,. they're pretty straight forward and just a straight port from C.
 
-
-
+Next, we'll create a quick implementation of the Sampler struct and define a few methods.
 
 ```rust
+impl Sampler {
+    fn new(vocab_size: usize, temperature: f32, topp: f32, rng_seed: u64) -> Self {
+        Sampler {
+            vocab_size,
+            temperature,
+            topp,
+            rng_state: rng_seed,
+            // Pre-allocate buffer for nucleus sampling
+            probindex: Vec::with_capacity(vocab_size),
+        }
+    }
 
+    fn sample(&mut self, logits: &mut [f32]) -> i32 {
+        // sample the token given the logits and some hyperparameters
+        let next;
+
+        if self.temperature == 0.0f32 {
+            // greedy argmax sampling: take the token with the highest probability
+            next = sample_argmax(logits, self.vocab_size);
+        } else {
+            // apply the temperature to the logits
+            for q in 0..self.vocab_size {
+                logits[q] /= self.temperature;
+            }
+
+            // apply softmax to the logits to get the probabilities for next token
+            softmax(logits, self.vocab_size);
+
+            // flip a (float) coin (this is our source of entropy for sampling)
+            let coin = random_f32(&mut self.rng_state);
+
+            // we sample from this distribution to get the next token
+            if self.topp <= 0.0 || self.topp >= 1.0 {
+                // simply sample from the predicted probability distribution
+                next = sample_mult(logits, self.vocab_size, coin);
+            } else {
+                // top-p (nucleus) sampling, clamping the least likely tokens to zero
+                next = sample_topp(
+                    logits,
+                    self.vocab_size,
+                    self.topp,
+                    &mut self.probindex,
+                    coin,
+                ) as i32;
+            }
+        }
+
+        next
+    }
+}
 ```
+
+Here we define a `new` method to instantiate a new sampler and then we define the sample method. The sample method chooses the right sample method depending on the params that the user has set.
+
+## Generate and Chat
+
+We finally made it to the last section! We're now ready to implement our generate function which runs the generation function and the chat function which accepts our prompt.
 
 ```rust
 
