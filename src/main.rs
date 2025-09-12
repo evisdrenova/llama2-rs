@@ -740,6 +740,58 @@ fn str_lookup_concise(str: &str, sorted_vocab: &[TokenIndex]) -> i32 {
     }
 }
 
+// ----------------------------------------------------------------------------
+// The Sampler, which takes logits and returns a sampled token
+// sampling can be done in a few ways: greedy argmax, sampling, top-p sampling
+
+pub struct ProbIndex {
+    prob: f32,
+    index: usize, // struct used when sorting probabilities during top-p sampling
+}
+
+pub struct Sampler {
+    vocab_size: i32,
+    probindex: ProbIndex,
+    temperate: f32,
+    topp: f32,
+    rng_state: i32,
+}
+
+fn sample_argmax(prob: &[f32], n: usize) -> i32 {
+    let mut max_i: i32 = 0;
+    let mut max_p = prob[0];
+
+    // return the index that has the highest probability
+    //greedy
+    for i in 0..n {
+        if prob[0] > max_p {
+            max_i = i as i32;
+            max_p = prob[i]
+        }
+    }
+    max_i
+}
+
+fn sample_mult(prob: &[f32], n: usize, coin: f32) -> i32 {
+    // sample index from probabilities (they must sum to 1!)
+    // coin is a random number in [0, 1), usually from random_f32()
+
+    let mut cdf = 0.0f32;
+    for i in 0..n {
+        cdf += prob[i];
+        if coin < cdf {
+            return i as i32;
+        }
+    }
+
+    return (n as i32) - 1;
+}
+
+fn compare(a: &ProbIndex, b: &ProbIndex) -> Ordering {
+    // reversed comparison for descending order (higher prob first)
+    b.prob.partial_cmp(&a.prob).unwrap_or(Ordering::Equal)
+}
+
 fn main() {
     println!("Hello, world!");
 }

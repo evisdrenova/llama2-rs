@@ -751,6 +751,12 @@ Lastly the final step adds the end of seuence token:
 if eos { tokens.push(2); } // End of sequence
 ```
 
+## Sampler
+
+Nice - we're geting pretty close to being done. Next, we have the sampler. The sampler takes in logits and returns a sampled token from a distribution. There are a few ways to do this: greedy argmax, sampling, top-p sampling and others but we'll focus on these for now.
+
+We'll define our structs to our tokens and then convert a few helper functions. the 
+
 ```rust
 
 ```
