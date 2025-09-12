@@ -417,4 +417,352 @@ fn parse_hex_byte(s: &str) -> Option<u8> {
 }
 ```
 
-It does a basic token lookup in the vocab and it handles whitespace after the BOS (beginning of sequence) token.
+It does a basic token lookup in the vocab and it handles whitespace after the BOS (beginning of sequence) token. There are a couple of more helper functions that we convert: safe_printf and str_lookup, then we get to the other big function, encode.
+
+The encode function takes in a prompt and encodes it into a token array that we can then embed.Here's what it does:
+
+1. Splits text into UTF-8 characters
+2. Looks up each character in vocabulary
+3. Falls back to byte encoding for unknown characters
+4. Merges tokens using BPE to find optimal subword segmentation
+5. Adds special tokens (BOS/EOS) as needed
+
+Here's the entire function:
+
+```rust
+// encode the string text (input) into an upper-bound preallocated tokens[] array
+// bos != 0 means prepend the BOS token (=1), eos != 0 means append the EOS token (=2)
+fn encode(t: &mut Tokenizer, text: &str, bos: bool, eos: bool, tokens: &mut Vec<i32>) -> usize {
+    // Clear the tokens vector to start fresh
+    tokens.clear();
+
+    // Initialize sorted vocabulary if needed (lazy initialization)
+    if t.sorted_vocab.is_none() {
+        // Create TokenIndex entries for all vocabulary items
+        let mut sorted_vocab = Vec::with_capacity(t.vocab_size as usize);
+        for (i, vocab_str) in t.vocab.iter().enumerate() {
+            sorted_vocab.push(TokenIndex {
+                str: vocab_str.to_string(),
+                id: i,
+            });
+        }
+        // Sort vocabulary by string for binary search
+        sorted_vocab.sort_by(|a, b| a.str.cmp(&b.str));
+        t.sorted_vocab = Some(sorted_vocab);
+    }
+
+    // Create a temporary buffer for merge candidates
+    // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
+    let buffer_size = (t.max_token_length * 2 + 1 + 2) as usize;
+    let mut str_buffer = String::with_capacity(buffer_size);
+
+    // Add optional BOS (=1) token, if desired
+    if bos {
+        tokens.push(1);
+    }
+
+    // Add dummy prefix token if text is not empty
+    // This prepends a space token to match SentencePiece behavior
+    if !text.is_empty() {
+        if let Some(ref sorted_vocab) = t.sorted_vocab {
+            let dummy_prefix = str_lookup_concise(" ", sorted_vocab);
+            if dummy_prefix != -1 {
+                tokens.push(dummy_prefix);
+            }
+        }
+    }
+
+    // Process the raw UTF-8 byte sequence of the input string
+    let text_bytes = text.as_bytes();
+    let mut i = 0;
+    let mut str_len = 0;
+    let mut byte_buffer = [0u8; 4]; // Buffer for current UTF-8 character
+
+    while i < text_bytes.len() {
+        let current_byte = text_bytes[i];
+
+        // Reset buffer if the current byte is ASCII or a leading byte
+        // 0xC0 is 11000000, so (byte & 0xC0) keeps the first 2 bits
+        // 0x80 is 10000000 - UTF-8 continuation bytes start with "10"
+        // So this checks: "if this byte is NOT a continuation byte"
+        if (current_byte & 0xC0) != 0x80 {
+            // This byte is either a leading byte (11...) or ASCII (0x...)
+            // Reset our position as we're starting a new UTF-8 codepoint
+            str_len = 0;
+        }
+
+        // Append the current byte to the buffer
+        byte_buffer[str_len] = current_byte;
+        str_len += 1;
+
+        // Check if next character is a continuation byte
+        let next_is_continuation = if i + 1 < text_bytes.len() {
+            (text_bytes[i + 1] & 0xC0) == 0x80 && str_len < 4
+        } else {
+            false
+        };
+
+        // If next byte is continuation, keep collecting bytes
+        if next_is_continuation {
+            i += 1;
+            continue;
+        }
+
+        // We've collected a complete UTF-8 codepoint
+        // Convert bytes to string and look up in vocabulary
+        if let Ok(utf8_str) = std::str::from_utf8(&byte_buffer[..str_len]) {
+            if let Some(ref sorted_vocab) = t.sorted_vocab {
+                let id = str_lookup_concise(utf8_str, sorted_vocab);
+
+                if id != -1 {
+                    // Found this codepoint in vocab, add it as a token
+                    tokens.push(id);
+                } else {
+                    // Byte fallback encoding: encode each byte as a token
+                    // +3 because first 3 vocab elements are <unk>, <s>, </s>
+                    for j in 0..str_len {
+                        tokens.push(byte_buffer[j] as i32 + 3);
+                    }
+                }
+            }
+        }
+
+        str_len = 0; // Reset for next character
+        i += 1;
+    }
+
+    // Merge phase: find the best consecutive pair to merge iteratively
+    loop {
+        let mut best_score = -1e10_f32;
+        let mut best_id = -1_i32;
+        let mut best_idx = -1_isize;
+
+        // Look for the best pair to merge
+        for i in 0..(tokens.len().saturating_sub(1)) {
+            // Create concatenated string of two consecutive tokens
+            str_buffer.clear();
+            str_buffer.push_str(&t.vocab[tokens[i] as usize]);
+            str_buffer.push_str(&t.vocab[tokens[i + 1] as usize]);
+
+            // Check if this merged string exists in vocabulary
+            if let Some(ref sorted_vocab) = t.sorted_vocab {
+                let id = str_lookup_concise(&str_buffer, sorted_vocab);
+                if id != -1 {
+                    let score = t.vocab_scores[id as usize];
+                    if score > best_score {
+                        // This merge pair exists and has better score
+                        best_score = score;
+                        best_id = id;
+                        best_idx = i as isize;
+                    }
+                }
+            }
+        }
+
+        // If no good merge found, we're done
+        if best_idx == -1 {
+            break;
+        }
+
+        // Merge the consecutive pair (best_idx, best_idx+1) into new token best_id
+        tokens[best_idx as usize] = best_id;
+
+        // Remove token at position best_idx+1 by shifting everything left
+        tokens.remove(best_idx as usize + 1);
+    }
+
+    // Add optional EOS (=2) token, if desired
+    if eos {
+        tokens.push(2);
+    }
+
+    tokens.len()
+}
+```
+
+Let's walk through this step by step.
+
+```rust
+if t.sorted_vocab.is_none() {
+    // Create TokenIndex entries for all vocabulary items
+    let mut sorted_vocab = Vec::with_capacity(t.vocab_size as usize);
+    for (i, vocab_str) in t.vocab.iter().enumerate() {
+        sorted_vocab.push(TokenIndex {
+            str: vocab_str.to_string(),
+            id: i,
+        });
+    }
+    // Sort vocabulary by string for binary search
+    sorted_vocab.sort_by(|a, b| a.str.cmp(&b.str));
+    t.sorted_vocab = Some(sorted_vocab);
+}
+```
+
+We start by lazily creating the sorted vocab when first needed. This involves iterating over the vocab and for each entry creating a `TokenIndex` with the string and id. Then we sort by the string to enable binary search lookups.
+
+Next, we create a temporary buffer for merge candidates.
+
+```rust
+  let buffer_size = (t.max_token_length * 2 + 1 + 2) as usize;
+    let mut str_buffer = String::with_capacity(buffer_size);
+
+```
+
+And then add special tokens:
+
+```rust
+    // Add optional BOS (=1) token, if desired
+    if bos {
+        tokens.push(1);
+    }
+
+    // Add dummy prefix token if text is not empty
+    // This prepends a space token to match SentencePiece behavior
+    if !text.is_empty() {
+        if let Some(ref sorted_vocab) = t.sorted_vocab {
+            let dummy_prefix = str_lookup_concise(" ", sorted_vocab);
+            if dummy_prefix != -1 {
+                tokens.push(dummy_prefix);
+            }
+        }
+    }
+
+```
+
+Then comes the hard part. This took a while and a lot of help from claude code.
+
+```rust
+    // Process the raw UTF-8 byte sequence of the input string
+    let text_bytes = text.as_bytes();
+    let mut i = 0;
+    let mut str_len = 0;
+    let mut byte_buffer = [0u8; 4]; // Buffer for current UTF-8 character
+
+    while i < text_bytes.len() {
+        let current_byte = text_bytes[i];
+
+        // Reset buffer if the current byte is ASCII or a leading byte
+        // 0xC0 is 11000000, so (byte & 0xC0) keeps the first 2 bits
+        // 0x80 is 10000000 - UTF-8 continuation bytes start with "10"
+        // So this checks: "if this byte is NOT a continuation byte"
+        if (current_byte & 0xC0) != 0x80 {
+            // This byte is either a leading byte (11...) or ASCII (0x...)
+            // Reset our position as we're starting a new UTF-8 codepoint
+            str_len = 0;
+        }
+
+        // Append the current byte to the buffer
+        byte_buffer[str_len] = current_byte;
+        str_len += 1;
+
+        // Check if next character is a continuation byte
+        let next_is_continuation = if i + 1 < text_bytes.len() {
+            (text_bytes[i + 1] & 0xC0) == 0x80 && str_len < 4
+        } else {
+            false
+        };
+
+        // If next byte is continuation, keep collecting bytes
+        if next_is_continuation {
+            i += 1;
+            continue;
+        }
+
+        // We've collected a complete UTF-8 codepoint
+        // Convert bytes to string and look up in vocabulary
+        if let Ok(utf8_str) = std::str::from_utf8(&byte_buffer[..str_len]) {
+            if let Some(ref sorted_vocab) = t.sorted_vocab {
+                let id = str_lookup_concise(utf8_str, sorted_vocab);
+
+                if id != -1 {
+                    // Found this codepoint in vocab, add it as a token
+                    tokens.push(id);
+                } else {
+                    // Byte fallback encoding: encode each byte as a token
+                    // +3 because first 3 vocab elements are <unk>, <s>, </s>
+                    for j in 0..str_len {
+                        tokens.push(byte_buffer[j] as i32 + 3);
+                    }
+                }
+            }
+        }
+
+        str_len = 0; // Reset for next character
+        i += 1;
+    }
+```
+
+This checks if we're at the start of a new character:
+
+0xC0 = 11000000 (binary mask for first 2 bits)
+0x80 = 10000000 (continuation bytes start with 10)
+If NOT a continuation byte, reset buffer for new character:
+
+```rust
+byte_buffer[str_len] = current_byte; str_len += 1;
+```
+
+Then we collect bytes that form one UTF-8 character:
+
+```rust
+let next_is_continuation = (text_bytes[i + 1] & 0xC0) == 0x80 && str_len < 4;
+```
+
+Then we check if next byte is part of same UTF-8 character (max 4 bytes per char)
+
+```rust
+let id = str_lookup_concise(utf8_str, sorted_vocab);
+if id != -1 { tokens.push(id); }
+```
+
+if character not in vocab, encode each byte as token ID (byte value + 3, since first 3 IDs are reserved for special tokens):
+
+```rust
+else {
+    for j in 0..str_len {
+        tokens.push(byte_buffer[j] as i32 + 3); // Byte fallback
+    }
+}
+```
+
+Then we get to the merge phase of the BPE algorithm. Here we iteratively merge the most frequent/highest-scoring consecutive token pairs until no more beneficial merges exist
+
+```rust
+loop {
+    // Find best consecutive pair to merge
+    for i in 0..(tokens.len().saturating_sub(1)) {
+        str_buffer = concat(vocab[tokens[i]], vocab[tokens[i+1]]);
+        let score = vocab_scores[merged_token_id];
+        // Track best scoring merge
+    }
+}
+```
+
+Then we execute the best merge by replacing two tokens with one:
+
+```rust
+tokens[best_idx] = best_id; // Replace first token with merged result
+tokens.remove(best_idx + 1); // Remove second token
+```
+
+Lastly the final step adds the end of seuence token:
+
+```rust
+if eos { tokens.push(2); } // End of sequence
+```
+
+```rust
+
+```
+
+```rust
+
+```
+
+```rust
+
+```
+
+```rust
+
+```
