@@ -1026,4 +1026,14 @@ fn render_chat_prompt(is_first_turn: bool, system_prompt: &str, user_prompt: &st
 
 There's a lot of code there but it's pretty straightforward. This wraps up our port of llama2.c to rust!
 
+Now let's try and run this thing.
+
+First, we need to download the tokenizer models and binaries. I'm just going to take them from the llama2.c repo and drop them in.
+
+We can try and run our model using:
+
+```bash
+cargo run --release -- stories15M.bin tokenizer.bin 500
+```
+
 I find that the best way to learn something is to re-implement it in a different language. Especially going from C where everything is so granular, you're really forced to get into the weeds.
