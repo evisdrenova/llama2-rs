@@ -417,4 +417,4 @@ fn parse_hex_byte(s: &str) -> Option<u8> {
 }
 ```
 
-It does a basisc token lookup in the vocab and it handles whitespce after the BOS (beginning of sequence) token.
+It does a basic token lookup in the vocab and it handles whitespace after the BOS (beginning of sequence) token.

@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use std::{
     cmp::Ordering,
     fs::File,
-    io::{self, BufReader, Read, Result},
+    io::{self, BufReader, Read, Result, Write},
     path::Path,
     string,
 };
@@ -543,6 +543,43 @@ fn parse_hex_byte(s: &str) -> Option<u8> {
         u8::from_str_radix(hex_part, 16).ok()
     } else {
         None
+    }
+}
+
+fn safe_printf(piece: Option<&str>) {
+    // piece might be a raw byte token, and we only want to print printable chars or whitespace
+    // because some of the other bytes can be various control codes, backspace, etc.
+
+    // Handle None case (equivalent to NULL in C)
+    let piece = match piece {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Handle empty string
+    if piece.is_empty() {
+        return;
+    }
+
+    // If piece is a single character, check if it's printable
+    if piece.len() == 1 {
+        let byte_val = piece.bytes().next().unwrap();
+        if !(byte_val.is_ascii_graphic() || byte_val.is_ascii_whitespace()) {
+            return; // bad byte, don't print it
+        }
+    }
+
+    print!("{}", piece);
+    io::stdout().flush().unwrap(); // Ensure immediate output like printf
+}
+
+fn str_lookup(str: &str, sorted_vocab: &[TokenIndex], vocab_size: usize) -> i32 {
+    // efficiently find the perfect match for str in vocab, return its index or -1 if not found
+
+    // Use binary search to find the token
+    match sorted_vocab.binary_search_by(|token| token.str.cmp(str)) {
+        Ok(index) => sorted_vocab[index].id as i32,
+        Err(_) => -1,
     }
 }
 
