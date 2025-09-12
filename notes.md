@@ -755,7 +755,10 @@ if eos { tokens.push(2); } // End of sequence
 
 Nice - we're geting pretty close to being done. Next, we have the sampler. The sampler takes in logits and returns a sampled token from a distribution. There are a few ways to do this: greedy argmax, sampling, top-p sampling and others but we'll focus on these for now.
 
-We'll define our structs to our tokens and then convert a few helper functions. the 
+I'm not going to go in depth on these next few functions,. they're pretty straight forward and just a straight port from C. 
+
+
+
 
 ```rust
 
