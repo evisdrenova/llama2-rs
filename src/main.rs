@@ -1068,6 +1068,13 @@ fn chat(
             user_turn = true;
             continue;
         }
+        if pos + 1 > transformer.config.seq_len as usize {
+            eprintln!(
+                "Reached max seq_len ({}). Stopping.",
+                transformer.config.seq_len
+            );
+            break;
+        }
 
         let logits = forward(transformer, token, pos);
         let mut logits_mut = logits.to_vec();
