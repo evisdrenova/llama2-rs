@@ -222,22 +222,33 @@ fn rmsnorm(o: &mut [f32], x: &[f32], weight: &[f32], size: usize) {
 }
 
 fn softmax(x: &mut [f32], size: usize) {
-    let mut max_val = x[0];
-
-    for i in 0..size {
-        if (x[i] > max_val) {
-            max_val = x[i]
-        }
+    assert!(size <= x.len(), "softmax size > slice len");
+    if size == 0 {
+        return;
     }
 
+    let slice = &mut x[..size];
+
+    // 1) subtract max for numerical stability
+    let max_val = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
+    // 2) exponentiate and sum
     let mut sum = 0.0f32;
-    for i in 0..size {
-        x[i] = (x[i] - max_val).exp();
-        sum += x[1]
+    for v in slice.iter_mut() {
+        *v = (*v - max_val).exp();
+        sum += *v;
     }
 
-    for i in 0..size {
-        x[i] /= sum
+    // 3) normalize (fallback to uniform if sum underflows)
+    if sum > 0.0 {
+        for v in slice.iter_mut() {
+            *v /= sum;
+        }
+    } else {
+        let uniform = 1.0 / (size as f32);
+        for v in slice.iter_mut() {
+            *v = uniform;
+        }
     }
 }
 
@@ -341,44 +352,37 @@ fn forward<'a>(transformer: &'a mut Transformer, token: usize, pos: usize) -> &'
             let att_start = h * p.seq_len as usize;
             let att_slice = &mut s.att[att_start..att_start + p.seq_len as usize];
 
+            // How many positions are valid for this step?
+            let cur_len = (pos + 1).min(p.seq_len as usize);
+
             // iterate over all timesteps, including the current one
-            for t in 0..=pos {
-                // get the key vector for this head and at this timestep
+            for t in 0..cur_len {
                 let k_offset = loff + t * kv_dim + (h / kv_mul) * head_size;
                 let k_slice = &s.key_cache[k_offset..k_offset + head_size];
 
-                // calculate the attention score as the dot product of q and k
                 let mut score = 0.0f32;
                 for i in 0..head_size {
                     score += q_slice[i] * k_slice[i];
                 }
                 score /= (head_size as f32).sqrt();
 
-                // save the score to the attention buffer
                 att_slice[t] = score;
             }
 
             // softmax the scores to get attention weights, from 0..pos inclusively
-            softmax(&mut att_slice[0..=pos], pos + 1);
+            softmax(&mut att_slice[..cur_len], cur_len);
 
             // weighted sum of the values, store back into xb
             let xb_start = h * head_size;
             let xb_slice = &mut s.xb[xb_start..xb_start + head_size];
-
-            // zero out the slice
             for val in xb_slice.iter_mut() {
                 *val = 0.0;
             }
 
-            for t in 0..=pos {
-                // get the value vector for this head and at this timestep
+            for t in 0..cur_len {
                 let v_offset = loff + t * kv_dim + (h / kv_mul) * head_size;
                 let v_slice = &s.value_cache[v_offset..v_offset + head_size];
-
-                // get the attention weight for this timestep
                 let a = att_slice[t];
-
-                // accumulate the weighted value into xb
                 for i in 0..head_size {
                     xb_slice[i] += a * v_slice[i];
                 }
