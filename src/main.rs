@@ -1362,31 +1362,19 @@ fn load_transformer(checkpoint_path: &str) -> io::Result<Transformer<'static>> {
 }
 
 fn main() -> io::Result<()> {
-    println!("1");
     let args: Vec<String> = std::env::args().collect();
     let model_path = args.get(1).map(String::as_str).unwrap_or("model.bin");
     let tokenizer_path = args.get(2).map(String::as_str).unwrap_or("tokenizer.bin");
     let steps: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
 
-    println!("2");
-    // temperature, topp, seed (tweak to taste)
     let temperature: f32 = 0.8;
     let topp: f32 = 0.9;
     let seed: u64 = 12345;
 
-    println!("3");
-
-    // 1) load transformer (mmap weights + allocate state buffers)
     let mut transformer = load_transformer(model_path)?;
 
-    println!("4");
-
-    // 2) load tokenizer
     let mut tokenizer = load_tokenizer(tokenizer_path, transformer.config.vocab_size)?;
 
-    println!("5");
-
-    // 3) sampler
     let mut sampler = Sampler::new(
         transformer.config.vocab_size as usize,
         temperature,
@@ -1394,7 +1382,6 @@ fn main() -> io::Result<()> {
         seed,
     );
 
-    // 4) chat loop
     chat(
         &mut transformer,
         &mut tokenizer,
