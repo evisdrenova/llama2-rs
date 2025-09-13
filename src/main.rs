@@ -1120,49 +1120,137 @@ fn render_chat_prompt(is_first_turn: bool, system_prompt: &str, user_prompt: &st
         format!("[INST] {} [/INST]", user_prompt)
     }
 }
+fn load_tokenizer(path: &str, expected_vocab_size: i32) -> io::Result<Tokenizer> {
+    let mut bytes = Vec::new();
+    File::open(Path::new(path))?.read_to_end(&mut bytes)?;
+    if bytes.len() < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("tokenizer file too small: {} bytes", bytes.len()),
+        ));
+    }
 
-fn load_tokenizer(path: &str, vocab_size: i32) -> io::Result<Tokenizer> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    // Try parse with/without header
+    let try_parse = |start_off: usize, count: Option<usize>| -> io::Result<Tokenizer> {
+        let mut t = Tokenizer {
+            vocab_size: 0,
+            vocab: Vec::new(),
+            vocab_scores: Vec::new(),
+            sorted_vocab: None,
+            max_token_length: 0,
+            byte_pieces: [0u8; 512],
+        };
+        for i in 0..256 {
+            t.byte_pieces[i * 2] = i as u8;
+            t.byte_pieces[i * 2 + 1] = 0;
+        }
 
-    let mut t = Tokenizer {
-        vocab_size,
-        vocab: Vec::with_capacity(vocab_size as usize),
-        vocab_scores: Vec::with_capacity(vocab_size as usize),
-        sorted_vocab: None,
-        max_token_length: 0,
-        byte_pieces: [0u8; 512],
+        let mut off = start_off;
+        let mut tokens = 0usize;
+        let hard_cap = count.unwrap_or(usize::MAX);
+
+        while off + 8 <= bytes.len() && tokens < hard_cap {
+            // score
+            let sb: [u8; 4] = bytes[off..off + 4].try_into().unwrap();
+            off += 4;
+            let score = f32::from_le_bytes(sb);
+
+            // len
+            let lb: [u8; 4] = bytes[off..off + 4].try_into().unwrap();
+            off += 4;
+            let len = i32::from_le_bytes(lb);
+            if len < 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("negative string length at token {}", tokens),
+                ));
+            }
+            let len = len as usize;
+
+            // sanity: cap individual token length
+            if len > 1_000_000 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unreasonable string length {} at token {}", len, tokens),
+                ));
+            }
+            if off + len > bytes.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "EOF while reading string payload of token {} (need {} bytes, have {})",
+                        tokens,
+                        len,
+                        bytes.len() - off
+                    ),
+                ));
+            }
+
+            let s = std::str::from_utf8(&bytes[off..off + len])
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid UTF-8 at token {}", tokens),
+                    )
+                })?
+                .to_string();
+            off += len;
+
+            t.vocab_scores.push(score);
+            t.vocab.push(s);
+            tokens += 1;
+        }
+
+        t.vocab_size = t.vocab.len() as i32;
+        if let Some(expected) = count.map(|c| c as i32) {
+            if t.vocab_size != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "parsed {} tokens but expected {} (layout start_off={})",
+                        t.vocab_size, expected, start_off
+                    ),
+                ));
+            }
+        }
+        t.max_token_length = t.vocab.iter().map(|s| s.len() as u32).max().unwrap_or(0);
+        Ok(t)
     };
 
-    // byte pieces for fallback
-    for i in 0..256 {
-        t.byte_pieces[i * 2] = i as u8;
-        t.byte_pieces[i * 2 + 1] = 0u8;
+    // Read possible header vocab_size
+    let header_vocab = i32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    let has_reasonable_header = header_vocab > 0 && header_vocab < 1_000_000;
+
+    // Strategy:
+    // 1) If header looks reasonable, try Layout B using header_vocab.
+    // 2) If that fails, try Layout A with expected_vocab_size.
+    // 3) If that fails, try Layout A w/out forcing count (consume all).
+    if has_reasonable_header {
+        if let Ok(tok) = try_parse(size_of::<i32>(), Some(header_vocab as usize)) {
+            // Optional: verify it matches model header (warn if not equal)
+            if header_vocab != expected_vocab_size {
+                eprintln!(
+                    "⚠️ tokenizer header vocab_size ({}) != model header vocab_size ({}). Using tokenizer value.",
+                    header_vocab, expected_vocab_size
+                );
+            }
+            return Ok(tok);
+        }
     }
 
-    for _ in 0..vocab_size {
-        // score
-        let mut sb = [0u8; std::mem::size_of::<f32>()];
-        reader.read_exact(&mut sb)?;
-        t.vocab_scores.push(f32::from_le_bytes(sb));
-
-        // len
-        let mut lb = [0u8; std::mem::size_of::<i32>()];
-        reader.read_exact(&mut lb)?;
-        let len = i32::from_le_bytes(lb) as usize;
-
-        // string
-        let mut bytes = vec![0u8; len];
-        reader.read_exact(&mut bytes)?;
-        let s = String::from_utf8(bytes)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 in vocab"))?;
-        t.vocab.push(s);
+    if let Ok(tok) = try_parse(0, Some(expected_vocab_size as usize)) {
+        return Ok(tok);
     }
 
-    // derive max token length
-    t.max_token_length = t.vocab.iter().map(|s| s.len() as u32).max().unwrap_or(0);
-
-    Ok(t)
+    // Fallback: parse entire file without a forced count (helps debugging)
+    let tok = try_parse(0, None)?;
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "could not parse tokenizer with expected vocab {}, parsed {} tokens instead",
+            expected_vocab_size, tok.vocab_size
+        ),
+    ))
 }
 
 fn load_transformer(checkpoint_path: &str) -> io::Result<Transformer<'static>> {
@@ -1270,21 +1358,29 @@ fn load_transformer(checkpoint_path: &str) -> io::Result<Transformer<'static>> {
 }
 
 fn main() -> io::Result<()> {
+    println!("1");
     let args: Vec<String> = std::env::args().collect();
     let model_path = args.get(1).map(String::as_str).unwrap_or("model.bin");
     let tokenizer_path = args.get(2).map(String::as_str).unwrap_or("tokenizer.bin");
     let steps: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
 
+    println!("2");
     // temperature, topp, seed (tweak to taste)
     let temperature: f32 = 0.8;
     let topp: f32 = 0.9;
     let seed: u64 = 12345;
 
+    println!("3");
+
     // 1) load transformer (mmap weights + allocate state buffers)
     let mut transformer = load_transformer(model_path)?;
 
+    println!("4");
+
     // 2) load tokenizer
     let mut tokenizer = load_tokenizer(tokenizer_path, transformer.config.vocab_size)?;
+
+    println!("5");
 
     // 3) sampler
     let mut sampler = Sampler::new(
@@ -1299,8 +1395,8 @@ fn main() -> io::Result<()> {
         &mut transformer,
         &mut tokenizer,
         &mut sampler,
-        None, // CLI user prompt (first turn); None -> prompt on stdin
-        None, // CLI system prompt (first turn); None -> optional stdin
+        None,
+        None,
         steps,
     )
 }
